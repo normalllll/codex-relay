@@ -10,6 +10,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { parseToolArguments } from "../cli.mjs";
+import { WatchStore } from "../watch-store.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -173,7 +174,7 @@ test("MCP discovers common tools and rejects invalid inputs without touching des
   const responses = stdout.trim().split("\n").map(JSON.parse);
   assert.equal(responses.find((response) => response.id === 1).result.serverInfo.name, "codex-relay");
   const names = responses.find((response) => response.id === 2).result.tools.map((tool) => tool.name);
-  for (const name of ["codex_reply", "codex_watch", "codex_events", "codex_watch_ack", "codex_supervise", "codex_preflight", "codex_host"]) assert.ok(names.includes(name));
+  for (const name of ["codex_reply", "codex_watch", "codex_events", "codex_event_context", "codex_event_report", "codex_watch_ack", "codex_supervise", "codex_preflight", "codex_host"]) assert.ok(names.includes(name));
   assert.equal(responses.find((response) => response.id === 3).result.isError, true);
 });
 
@@ -276,6 +277,54 @@ test("card-aware replies preserve agent provenance and deduplicate answers plus 
   assert.match(messages[0].clientUserMessageId, /^[a-f0-9-]{36}$/);
 });
 
+test("event CLI reads compact current state, pages original reports and rearms without echoing snapshots", async (t) => {
+  const f = fixture(t), calls = [];
+  const store = new WatchStore(f.relay);
+  const watch = store.subscribe({ threadId: "watched", supervisor: { host: "codex", threadId: "caller-thread" },
+    goal: { task: "Fix the regression", doneWhen: "Regression tests pass" } });
+  const report = "Original event report. ".repeat(1000) + "REPORT-END";
+  const [event] = store.observe(watch.id, { turnId: "original-turn", turnStatus: "completed", latestMessage: { phase: "final_answer", text: report } });
+  Object.assign(f.env, { CODEX_RELAY_WAKE_EVENT_ID: event.id, CODEX_RELAY_WAKE_SUBSCRIPTION_ID: watch.id, CODEX_RELAY_WAKE_THREAD_ID: "watched" });
+  await mockDesktop(f, (request) => {
+    const { tool } = request.params; calls.push(tool);
+    if (tool === "list_threads") return success({ threads: [] });
+    if (tool === "wait_threads") return success({ polls: [{ thread: { id: "watched", status: { type: "idle" } },
+      latestTurn: { id: "newer-turn", status: "completed" }, latestAssistantMessage: { phase: "final_answer", text: "Current result. ".repeat(500) } }] });
+    if (tool === "read_thread") return success({ thread: { id: "watched" }, turns: [
+      { id: "newer-turn", items: [{ type: "agentMessage", text: "Unrelated newer report" }] },
+      { id: "original-turn", items: [{ type: "agentMessage", text: report }] },
+    ] });
+    throw new Error(`Unexpected event tool ${tool}`);
+  });
+  const input = path.join(f.dir, "event-input.json");
+  const run = (command, args) => { fs.writeFileSync(input, JSON.stringify(args)); return f.cli(command, "--input-file", input); };
+  const context = await run("event-context", { eventId: event.id });
+  assert.equal(context.code, 0, JSON.stringify(context.value));
+  assert.equal(context.value.stale, true);
+  assert.equal(context.value.goal.doneWhen, "Regression tests pass");
+  assert.equal(context.value.current.latestMessage.text.length, 400);
+  assert.equal(context.value.eventPreview.latestMessage.text.length, 400);
+  assert.equal(JSON.stringify(context.value).includes("REPORT-END"), false);
+  assert.equal(calls.filter((name) => name === "read_thread").length, 0, "A context read does not request the full report");
+  const page = await run("event-report", { eventId: event.id, limit: 256 });
+  assert.equal(page.value.text, report.slice(0, 256));
+  assert.equal(page.value.complete, true);
+  assert.equal(page.value.turnId, "original-turn");
+  const finalPage = await run("event-report", { eventId: event.id, offset: report.length - 10, reportHash: page.value.reportHash });
+  assert.equal(finalPage.value.text, "REPORT-END");
+  const ack = await run("ack", { eventId: event.id, action: "rearm" });
+  assert.equal(ack.value.phase, "acknowledged");
+  assert.equal(Object.hasOwn(ack.value, "payload"), false);
+  assert.ok(JSON.stringify(ack.value).length < 500);
+  const previousCalls = calls.length;
+  const handled = await run("event-context", { eventId: event.id });
+  assert.equal(handled.value.handled, true);
+  assert.equal(handled.value.nextAction, "skip");
+  assert.equal(calls.length, previousCalls, "Acknowledged events do not requery the desktop after process restart");
+  assert.equal(store.list()[0].enabled, true);
+  assert.equal(store.observe(watch.id, { turnId: "next-turn", turnStatus: "completed", latestMessage: { text: "Next result" } }).length, 1);
+});
+
 test("scoped MCP wake workers reject other threads and unsolicited tools", async (t) => {
   const f = fixture(t);
   Object.assign(f.env, { CODEX_RELAY_WAKE_EVENT_ID: "event-1", CODEX_RELAY_WAKE_SUBSCRIPTION_ID: "watch-1", CODEX_RELAY_WAKE_THREAD_ID: "watched" });
@@ -285,12 +334,16 @@ test("scoped MCP wake workers reject other threads and unsolicited tools", async
     { id: 1, method: "tools/list" },
     { id: 2, method: "tools/call", params: { name: "codex_status", arguments: { threadId: "unrelated" } } },
     { id: 3, method: "tools/call", params: { name: "codex_start", arguments: { prompt: "Unsolicited task" } } },
+    { id: 4, method: "tools/call", params: { name: "codex_event_context", arguments: { eventId: "another-event" } } },
+    { id: 5, method: "tools/call", params: { name: "codex_event_report", arguments: { eventId: "another-event" } } },
   ].map(JSON.stringify).join("\n") + "\n");
   const [code] = await once(proc, "exit"); assert.equal(code, 0);
   const replies = stdout.trim().split("\n").map(JSON.parse);
-  assert.deepEqual(replies.find((r) => r.id === 1).result.tools.map((tool) => tool.name).sort(), ["codex_delivery", "codex_events", "codex_reply", "codex_status", "codex_watch_ack"]);
+  assert.deepEqual(replies.find((r) => r.id === 1).result.tools.map((tool) => tool.name).sort(), ["codex_delivery", "codex_event_context", "codex_event_report", "codex_events", "codex_reply", "codex_status", "codex_watch_ack"]);
   assert.equal(replies.find((r) => r.id === 2).result.isError, true);
   assert.equal(replies.find((r) => r.id === 3).result.isError, true);
+  assert.equal(replies.find((r) => r.id === 4).result.isError, true);
+  assert.equal(replies.find((r) => r.id === 5).result.isError, true);
 });
 
 test("cancelling a long poll releases its socket so a background wait can finish promptly", async (t) => {

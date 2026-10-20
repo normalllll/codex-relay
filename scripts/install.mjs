@@ -11,7 +11,7 @@ import { controlPipeFor } from "../paths.mjs";
 const SOURCE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MARKER = ".codex-relay-managed.json";
 const LAUNCH_AGENT = "local.codex-relay.watcher";
-const REQUIRED = ["cli.mjs", "mcp.mjs", "relay-server.mjs", "daemon.mjs", "service.mjs", "supervision.mjs", "model-policy.mjs", "paths.mjs", "skills/codex-relay/SKILL.md", "scripts/install.mjs"];
+const REQUIRED = ["cli.mjs", "mcp.mjs", "relay-server.mjs", "daemon.mjs", "service.mjs", "supervision.mjs", "model-policy.mjs", "event-context.mjs", "task-report.mjs", "paths.mjs", "skills/codex-relay/SKILL.md", "scripts/install.mjs"];
 const roots = new Set(["src", "lib", "scripts", "skills", "assets", "docs"]);
 const digest = (data) => crypto.createHash("sha256").update(data).digest("hex");
 const read = (file) => fs.existsSync(file) ? fs.readFileSync(file) : null;

@@ -32,21 +32,22 @@ test("Codex wakes the existing supervisor through delegated app messaging withou
   assert.deepEqual(await wake(watched, event), { delivered: true, via: "codex-desktop", supervisorThreadId: "supervisor-thread" });
   assert.equal(calls[0][0], "send_message_to_thread");
   assert.equal(calls[0][1].threadId, "supervisor-thread");
-  assert.match(calls[0][1].prompt, /Event ID: event-1/);
-  assert.match(calls[0][1].prompt, /MCP codex_watch_ack/);
-  assert.match(calls[0][1].prompt, /not new human input or approval/);
+  assert.deepEqual(JSON.parse(calls[0][1].prompt), { relayEvent: 1, eventId: "event-1", subscriptionId: "watch-1", type: "question" });
   await assert.rejects(wake({ ...watched, supervisor: { host: "codex", threadId: "target-thread" } }, event), { delivery: "notSent" });
   assert.equal(calls.length, 1);
 });
 
-test("wake prompt reads durable payloads and passes cancellation to the Codex sender", async () => {
+test("wake envelopes exclude reports, goals and repeated instructions and pass cancellation", async () => {
   const controller = new AbortController();
   let options;
   const wake = createWakeHost({ callApp: async (_tool, _args, value) => { options = value; } });
   const currentEvent = { ...event, payload: { marker: "durable-payload" }, snapshot: { marker: "old-snapshot" } };
-  const prompt = buildWakePrompt(watched, currentEvent);
-  assert.match(prompt, /durable-payload/);
-  assert.doesNotMatch(prompt, /old-snapshot/);
+  const prompt = buildWakePrompt({ ...watched, goal: { task: "Large authorized task".repeat(10000), doneWhen: "Acceptance criteria".repeat(10000) } }, {
+    ...currentEvent, payload: { text: "Large report".repeat(100000) },
+  });
+  assert.deepEqual(JSON.parse(prompt), { relayEvent: 1, eventId: "event-1", subscriptionId: "watch-1", type: "question" });
+  assert.ok(prompt.length < 150);
+  assert.doesNotMatch(prompt, /Large|old-snapshot|codex_watch_ack/);
   await wake(watched, currentEvent, { signal: controller.signal });
   assert.equal(options.signal, controller.signal);
   controller.abort();
@@ -77,7 +78,7 @@ test("explicit Codex queue mode verifies CLI capability and queues the stable ev
   assert.deepEqual(calls[0].args, ["queue", "--help"]);
   assert.equal(calls[1].executable, process.execPath);
   assert.deepEqual(calls[1].args.slice(0, 4), ["queue", "--thread", "supervisor-thread", "--message"]);
-  assert.match(calls[1].args[4], /Event ID: event-1/);
+  assert.equal(JSON.parse(calls[1].args[4]).eventId, "event-1");
   assert.equal(calls[1].args.length, 5, "Queueing inherits the selected session settings without per-message model overrides");
   assert.equal(calls[1].options.signal, controller.signal);
   assert.equal(calls[1].options.cwd, f.dir);
@@ -142,9 +143,9 @@ test("unattended Claude resume uses stdin, scoped MCP and a narrow allowed-tools
   assert.equal(invoked.options.env.CLAUDE_CODE_DISABLE_FAST_MODE, "1");
   assert.equal(invoked.args[invoked.args.indexOf("--settings") + 1], '{"fastMode":false}');
   assert.equal(invoked.args[invoked.args.indexOf("--tools") + 1], "");
-  assert.match(invoked.options.input, /Event ID: event-1/);
+  assert.equal(JSON.parse(invoked.options.input).eventId, "event-1");
   const allowed = invoked.args.slice(invoked.args.indexOf("--allowedTools") + 1);
-  assert.deepEqual(allowed, ["mcp__codex_relay__codex_events", "mcp__codex_relay__codex_status", "mcp__codex_relay__codex_reply", "mcp__codex_relay__codex_watch_ack", "mcp__codex_relay__codex_delivery"]);
+  assert.deepEqual(allowed, ["mcp__codex_relay__codex_event_context", "mcp__codex_relay__codex_event_report", "mcp__codex_relay__codex_events", "mcp__codex_relay__codex_status", "mcp__codex_relay__codex_reply", "mcp__codex_relay__codex_watch_ack", "mcp__codex_relay__codex_delivery"]);
   assert.deepEqual(fs.readdirSync(path.join(f.dir, "wake-locks")), []);
   assert.deepEqual(fs.readdirSync(path.join(f.dir, "wake-configs")), []);
 });

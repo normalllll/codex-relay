@@ -124,7 +124,7 @@ async function handleControl(request) {
   if (request.token !== TOKEN) throw new Error("invalid token");
   if (!ALLOWED_METHODS.has(request.method)) throw new Error(`method not allowed: ${request.method}`);
   if (request.method === "relay/info")
-    return { pid: process.pid, version: "0.5.0", appPipe: APP_PIPE != null, hostId: HOST_ID ?? null };
+    return { pid: process.pid, version: "0.6.0", appPipe: APP_PIPE != null, hostId: HOST_ID ?? null };
   if (request.method === "tools/list")
     return app.request("tools/list", { threadStartKind: "all", ...request.params });
   const p = request.params ?? {};
@@ -207,7 +207,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       return reply({
         protocolVersion: "2025-06-18",
         capabilities: { tools: {} },
-        serverInfo: { name: "codex-relay-bridge", version: "0.5.0" },
+        serverInfo: { name: "codex-relay-bridge", version: "0.6.0" },
       });
     case "ping":
       return reply({});

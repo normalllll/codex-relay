@@ -165,6 +165,14 @@ export class WatchStore {
     return this.transaction((state) => Object.values(state.events).filter((event) => (!subscriptionId || event.subscriptionId === subscriptionId) && (includeAcknowledged || !terminalPhases.has(event.phase))), { write: false });
   }
 
+  eventContext(eventId) {
+    return this.transaction((state) => {
+      const event = state.events[eventId];
+      if (!event) throw new Error("Unknown watch event");
+      return { event, subscription: state.subscriptions[event.subscriptionId] ?? null };
+    }, { write: false });
+  }
+
   ack({ eventId, action = "rearm", now = Date.now() }) {
     if (!["rearm", "complete", "retry"].includes(action)) throw new Error("action must be rearm, complete, or retry");
     return this.transaction((state) => {

@@ -8,6 +8,7 @@ const commands = {
   watch: "codex_watch", watches: "codex_watches", events: "codex_events", ack: "codex_watch_ack", unwatch: "codex_unwatch",
   delivery: "codex_delivery",
   preflight: "codex_preflight", supervise: "codex_supervise",
+  "event-context": "codex_event_context", "event-report": "codex_event_report",
 };
 const valueFlags = {
   "--project": "projectPath", "--project-id": "projectId", "--title": "title", "--limit": "limit",
@@ -16,7 +17,7 @@ const valueFlags = {
 const boolFlags = { "--worktree": "worktree", "--past-attention": "pastAttention", "--user-provided": "userProvided", "--allow-open": "allowOpen" };
 
 export const help = {
-  name: "codex-relay", version: "0.5.0", output: "One JSON result on stdout; errors have ok:false and exit code 1. Help is JSON too.",
+  name: "codex-relay", version: "0.6.0", output: "One JSON result on stdout; errors have ok:false and exit code 1. Help is JSON too.",
   execution: "Run this file directly with the absolute Node or Bun executable. No build, package install, or global PATH changes.",
   commands: {
     projects: "projects",
@@ -32,6 +33,8 @@ export const help = {
     supervise: "supervise --input-file <JSON {requestId,task,doneWhen,createNew:true or threadId or threadTitle,projectPath?,supervisor?}> (automatic check/create/select/watch)",
     watch: "watch --input-file <JSON {threadId,supervisor:{host,threadId or sessionId,mode,cwd,executable}}> (MCP codex_watch is primary)",
     watches: "watches", events: "events --input-file <JSON {subscriptionId,includeAcknowledged?}>",
+    "event-context": "event-context --input-file <JSON {eventId,previewChars?}> (one compact event and current-state read)",
+    "event-report": "event-report --input-file <JSON {eventId,section?,offset?,limit?,reportHash?}> (read full report only when needed)",
     ack: "ack --input-file <JSON {eventId,action:rearm|complete|retry}>", unwatch: "unwatch --input-file <JSON {subscriptionId}>",
     service: "service start|stop|status (persistent background watcher control)",
     delivery: "delivery --request-id <id> (inspect persistent send stages)",

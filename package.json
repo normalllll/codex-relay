@@ -1,6 +1,6 @@
 {
   "name": "codex-relay",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "MCP-first Codex desktop relay with durable supervision, host wake adapters, and a source-installed Node/Bun Skill and CLI. Tested on Windows; macOS and Linux are implemented but untested with a live desktop.",
   "author": "normalllll",

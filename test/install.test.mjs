@@ -54,6 +54,8 @@ function fixture(t, platform = "win32", prefix = "codex-relay-install-") {
     "service.mjs": "// fixture stable watcher launcher\n",
     "supervision.mjs": "// fixture supervision workflow\n",
     "model-policy.mjs": "// fixture session policy inspection\n",
+    "event-context.mjs": "// fixture combined event reader\n",
+    "task-report.mjs": "// fixture original turn report reader\n",
     "paths.mjs": "export const value = 42;\n",
     "README.md": "Fixture source\n",
     "skills/codex-relay/SKILL.md": "---\nname: codex-relay\ndescription: Fixture skill\n---\nUse {{RUNTIME}} {{CLI_PATH}}; manage {{INSTALL_PATH}}.\n",
