@@ -1,4 +1,5 @@
-import test from "node:test";
+import { adaptTest } from "./support/harness.mjs";
+const test = adaptTest(await import(process.versions.bun ? "bun:test" : "node:test"));
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -13,7 +14,8 @@ import { parseToolArguments } from "../cli.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const runtime = process.execPath;
-const sqlite = await import(process.versions.bun ? "bun:sqlite" : "node:sqlite");
+const sqliteModule = process.versions.bun ? "bun:sqlite" : "node:sqlite";
+const sqlite = await import(sqliteModule);
 
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-relay-runtime-"));

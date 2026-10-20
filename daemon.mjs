@@ -10,10 +10,11 @@ import { WatchStore } from "./watch-store.mjs";
 import { WatchEngine } from "./watch-engine.mjs";
 import { createWakeHost } from "./host-wake.mjs";
 import { status } from "./codex-client.mjs";
+import { isMissingProcess } from "./process-state.mjs";
 
 const self = fileURLToPath(import.meta.url);
 const stopFile = path.join(relayHome, "watch-stop");
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; } };
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return !isMissingProcess(error); } };
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function acquire(name) {
@@ -60,6 +61,7 @@ export async function runDaemon({ pollMs = 2_000 } = {}) {
   const wake = createWakeHost({ sendChannel, signal: controller.signal });
   const engine = new WatchEngine({ store, status, wake, pollMs });
   const server = net.createServer((socket) => {
+    if (controller.signal.aborted) { socket.destroy(); return; }
     sockets.add(socket); socket.setEncoding("utf8");
     let buffer = "";
     socket.on("error", () => {});
@@ -121,9 +123,11 @@ export async function runDaemon({ pollMs = 2_000 } = {}) {
     return { ok: true, stopped: true };
   } finally {
     controller.abort();
+    // Stop accepting before draining persistent channels; a reconnect must not enter the drain.
+    const closed = new Promise((resolve) => server.close(resolve));
     for (const socket of sockets) socket.destroy();
     for (const entry of receipts.values()) { clearTimeout(entry.timer); entry.reject(Object.assign(new Error("Watch service stopped"), { delivery: "uncertain" })); }
-    await new Promise((resolve) => server.close(resolve));
+    await closed;
     process.removeListener("SIGTERM", stop); process.removeListener("SIGINT", stop); unlock();
   }
 }

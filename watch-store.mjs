@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";
+import { isMissingProcess } from "./process-state.mjs";
 
 const clone = (value) => structuredClone(value);
 const terminalPhases = new Set(["acknowledged"]);
@@ -22,7 +23,7 @@ export function supervisorKey(supervisor) {
 function alive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; }
-  catch (error) { return error.code === "EPERM"; }
+  catch (error) { return !isMissingProcess(error); }
 }
 
 function atomic(file, value) {
@@ -41,6 +42,10 @@ function atomic(file, value) {
 }
 
 const delaySync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// Windows can report a sharing violation as EPERM/EACCES while another process
+// is creating or deleting an exclusive lock. Retry within the existing deadline.
+const lockContention = (error) => error.code === "EEXIST" ||
+  (process.platform === "win32" && ["EPERM", "EACCES"].includes(error.code));
 
 /** Durable local outbox. All mutations are serialized across Node/Bun processes. */
 export class WatchStore {
@@ -63,9 +68,13 @@ export class WatchStore {
     while (fd === undefined) {
       try { fd = fs.openSync(this.lock, "wx", 0o600); }
       catch (error) {
-        if (error.code !== "EEXIST") throw error;
-        this.reclaimDeadLock();
-        if (Date.now() >= until) throw new Error("Watch state is busy; retry this local operation");
+        if (!lockContention(error)) throw error;
+        const reclaimError = this.reclaimDeadLock();
+        if (Date.now() >= until) {
+          if (reclaimError) throw reclaimError;
+          if (error.code !== "EEXIST") throw error;
+          throw new Error("Watch state is busy; retry this local operation");
+        }
         delaySync(10);
       }
     }
@@ -90,13 +99,24 @@ export class WatchStore {
   }
 
   reclaimDeadLock() {
+    // Most contention is a live transaction. Avoid racing on the reclaim guard
+    // unless the observed owner is dead or an incomplete lock is actually stale.
+    try {
+      let owner;
+      try { owner = JSON.parse(fs.readFileSync(this.lock, "utf8")); }
+      catch (error) {
+        if (error.code === "ENOENT") return;
+        if (Date.now() - fs.statSync(this.lock).mtimeMs <= this.malformedLockStaleMs) return;
+      }
+      if (owner && alive(owner.pid)) return;
+    } catch (error) { if (lockContention(error) || error.code === "ENOENT") return; throw error; }
     let guard;
     try { guard = fs.openSync(this.reclaimLock, "wx", 0o600); }
     catch (error) {
-      if (error.code !== "EEXIST") throw error;
+      if (!lockContention(error)) throw error;
       // Reclaim guards contain no state and are held only for synchronous operations.
       try { if (Date.now() - fs.statSync(this.reclaimLock).mtimeMs > this.malformedLockStaleMs) fs.unlinkSync(this.reclaimLock); } catch {}
-      return;
+      return error.code === "EEXIST" ? undefined : error;
     }
     try {
       let owner;

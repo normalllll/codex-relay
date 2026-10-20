@@ -140,7 +140,7 @@ On macOS and Linux the desktop IPC socket follows the Codex app's layout, `$CODE
 
 ```powershell
 node --test test/*.test.mjs
-bun test ./test
+bun test
 ```
 
 Tests use isolated homes, simulated desktop pipes, and fake host executables. They cover install/update/uninstall on all three autostart layouts, rollback, watcher persistence, deduplication, acknowledgments, crash recovery, host dispatch, message receipts, and Node/Bun execution. Read-only Codex connectivity can be checked with `doctor`; fake Claude-host tests do not establish live acceptance for every Claude CLI version.

@@ -111,7 +111,7 @@ uninstall 停止服务、移除登录启动器及自身管理的 MCP、Skill、�
 
 ```powershell
 node --test test/*.test.mjs
-bun test ./test
+bun test
 ```
 
 测试使用隔离用户目录、模拟桌面管道和假宿主程序，覆盖持久监听、去重、确认后重新监听、崩溃恢复、宿主投递、消息回执，以及三种平台自启动布局下的安装、更新、卸载和回滚。真实连接可通过只读 doctor 检查；假 Claude 宿主测试不能代表所有实际 Claude CLI 版本已通过运行验收。

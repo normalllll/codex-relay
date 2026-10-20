@@ -1,4 +1,5 @@
-import test from "node:test";
+import { adaptTest } from "./support/harness.mjs";
+const test = adaptTest(await import(process.versions.bun ? "bun:test" : "node:test"));
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -132,7 +133,8 @@ test("service lifecycle authenticates clients and restarts a crashed worker with
   const [event] = f.store.observe(subscription.id, { turnId: "turn-before-crash", turnStatus: "inProgress", questions: [{ callId: "question-before-crash", index: 0, question: "Choose a routine option" }] });
   assert.ok(event.id);
   f.recordLocks();
-  process.kill(started.pid);
+  // SIGTERM is a graceful zero-exit shutdown on Unix; SIGKILL exercises crash recovery everywhere.
+  process.kill(started.pid, "SIGKILL");
   const restarted = await waitFor(async () => {
     const response = await f.request("status");
     return response.result?.running && response.result.pid !== started.pid ? response.result : null;

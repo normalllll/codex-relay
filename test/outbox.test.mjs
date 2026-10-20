@@ -1,4 +1,5 @@
-import test from "node:test";
+import { adaptTest } from "./support/harness.mjs";
+const test = adaptTest(await import(process.versions.bun ? "bun:test" : "node:test"));
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

@@ -1,9 +1,11 @@
-import test from "node:test";
+import { adaptTest } from "./support/harness.mjs";
+const test = adaptTest(await import(process.versions.bun ? "bun:test" : "node:test"));
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { isMissingProcess } from "../process-state.mjs";
 // Import without probing the real user's pipe identity; all delivery paths are injected.
 const previousPipe = process.env.CODEX_RELAY_PIPE;
 process.env.CODEX_RELAY_PIPE = "host-wake-test-unused-pipe";
@@ -201,7 +203,7 @@ test("aborting a real resume waits for process exit before releasing its session
   assert.equal(fs.readdirSync(lockDir).length, 1, "Cancellation must not synchronously release the live-process lease");
   await assert.rejects(pending, { delivery: "uncertain" });
   assert.deepEqual(fs.readdirSync(lockDir), []);
-  assert.throws(() => process.kill(pid, 0), (error) => error.code === "ESRCH");
+  assert.throws(() => process.kill(pid, 0), isMissingProcess);
 });
 
 test("real runner handles timeout, pre-start cancellation, and split UTF-8 output", async (t) => {

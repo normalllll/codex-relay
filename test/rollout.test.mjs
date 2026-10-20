@@ -1,4 +1,5 @@
-import test from "node:test";
+import { adaptTest } from "./support/harness.mjs";
+const test = adaptTest(await import(process.versions.bun ? "bun:test" : "node:test"));
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -27,7 +28,7 @@ test("a first line without a preceding newline and a final line without a traili
 });
 
 test("multi-byte lines survive chunk boundaries and the byte limit discards a cut-off line", (t) => {
-  const long = "界".repeat(400_000); // 1.2 MB of three-byte characters spans read chunks
+  const long = "\u20ac".repeat(400_000); // 1.2 MB of three-byte characters spans read chunks
   const log = file(t, `head\n${long}\ntail\n`);
   const seen = [];
   assert.equal(scanRolloutBackward(log, (line) => { seen.push(line); return false; }), true);

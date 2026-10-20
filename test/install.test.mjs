@@ -1,4 +1,5 @@
-import test from "node:test";
+import { adaptTest } from "./support/harness.mjs";
+const test = adaptTest(await import(process.versions.bun ? "bun:test" : "node:test"));
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,6 +13,9 @@ import { main, inspectInstallation } from "../scripts/install.mjs";
 const installer = fileURLToPath(new URL("../scripts/install.mjs", import.meta.url));
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const write = (file, content) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content); };
+// Bun 1.2 on Windows reports a file blocking a recursive mkdir as ENOENT.
+const directoryConflict = (error) => /ENOTDIR|EEXIST|not a directory/i.test(error.message) ||
+  (Boolean(process.versions.bun) && error.code === "ENOENT" && error.syscall === "mkdir");
 
 test("doctor distinguishes sandbox access denial from a missing caller or desktop reload", async (t) => {
   const f = fixture(t);
@@ -279,7 +283,7 @@ test("filesystem failure rolls back configuration, skill changes, and newly stag
   write(config, original);
   // The second skill cannot be written, after the first skill and config were updated.
   write(path.join(f.home, ".claude", "skills"), "A user file blocks this directory");
-  await assert.rejects(f.run("install", "--source", f.source), /ENOTDIR|EEXIST|not a directory/i);
+  await assert.rejects(f.run("install", "--source", f.source), directoryConflict);
   assert.equal(fs.readFileSync(config, "utf8"), original);
   assert.equal(fs.readFileSync(path.join(f.home, ".claude", "skills"), "utf8"), "A user file blocks this directory");
   assert.equal(fs.existsSync(path.join(f.home, ".agents", "skills", "codex-relay")), false);
@@ -293,7 +297,7 @@ test("a startup write failure restores config and removes the staged stable laun
   const original = 'model = "preserve-before-startup"\n';
   write(config, original);
   write(path.join(f.home, "AppData"), "A user file blocks the startup directory");
-  await assert.rejects(f.run("install", "--source", f.source), /ENOTDIR|EEXIST|not a directory/i);
+  await assert.rejects(f.run("install", "--source", f.source), directoryConflict);
   assert.equal(fs.readFileSync(config, "utf8"), original);
   assert.equal(fs.readFileSync(path.join(f.home, "AppData"), "utf8"), "A user file blocks the startup directory");
   assert.equal(fs.existsSync(path.join(f.relay, "service.mjs")), false);

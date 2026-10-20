@@ -36,4 +36,4 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ matrix.bun }}
-      - run: bun test ./test
+      - run: bun test

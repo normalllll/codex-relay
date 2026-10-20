@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { relayHome, codexHome } from "./paths.mjs";
+import { isMissingProcess } from "./process-state.mjs";
 
 const defaultMcpPath = fileURLToPath(new URL("./mcp.mjs", import.meta.url));
 const MAX_OUTPUT = 1024 * 1024;
@@ -51,7 +52,7 @@ function classify(error) {
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid < 1) return true;
   try { process.kill(pid, 0); return true; }
-  catch (error) { return error.code !== "ESRCH"; }
+  catch (error) { return !isMissingProcess(error); }
 }
 
 function sessionLease(home, sessionId) {

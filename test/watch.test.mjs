@@ -1,4 +1,5 @@
-import test from "node:test";
+import { adaptTest } from "./support/harness.mjs";
+const test = adaptTest(await import(process.versions.bun ? "bun:test" : "node:test"));
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -173,6 +174,42 @@ test("separate Node/Bun processes serialize updates without losing subscriptions
   const results = await Promise.all(children.map(async (child) => { let stderr = ""; child.stderr.on("data", (data) => { stderr += data; }); const [code] = await once(child, "exit"); return { code, stderr }; }));
   for (const result of results) assert.equal(result.code, 0, result.stderr);
   assert.equal(store.list().length, 25);
+});
+
+test("a live state owner is never displaced or sent through reclaim-guard contention", (t) => {
+  const { store } = fixture(t, { lockTimeoutMs: 30 });
+  const lock = JSON.stringify({ pid: process.pid, nonce: "active-owner" });
+  fs.writeFileSync(store.lock, lock);
+  const originalOpen = fs.openSync;
+  fs.openSync = function (file, ...args) {
+    if (file === store.reclaimLock) throw new Error("A live owner must not contend for the reclaim guard");
+    return originalOpen.call(this, file, ...args);
+  };
+  try {
+    assert.throws(() => store.list(), /busy/);
+    assert.equal(fs.readFileSync(store.lock, "utf8"), lock);
+  } finally { fs.openSync = originalOpen; fs.unlinkSync(store.lock); }
+});
+
+test("Windows sharing violations retry without stealing locks or hiding permanent access denial", { skip: process.platform !== "win32" }, (t) => {
+  const { store } = fixture(t, { lockTimeoutMs: 60 });
+  fs.writeFileSync(store.lock, JSON.stringify({ pid: 999_999_999, nonce: "dead-owner" }));
+  const originalOpen = fs.openSync;
+  let collisions = 0;
+  fs.openSync = function (file, ...args) {
+    if (file === store.reclaimLock && collisions++ < 2) throw Object.assign(new Error("Temporary sharing violation"), { code: "EPERM" });
+    return originalOpen.call(this, file, ...args);
+  };
+  try {
+    assert.equal(store.list().length, 1);
+    assert.ok(collisions >= 3);
+  } finally { fs.openSync = originalOpen; }
+  fs.openSync = function (file, ...args) {
+    if (file === store.lock) throw Object.assign(new Error("Persistent access denial"), { code: "EACCES" });
+    return originalOpen.call(this, file, ...args);
+  };
+  try { assert.throws(() => store.list(), { code: "EACCES" }); }
+  finally { fs.openSync = originalOpen; }
 });
 
 test("read-only inspection and empty claims do not rewrite durable state", (t) => {

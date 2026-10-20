@@ -2,11 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { relayHome } from "./paths.mjs";
+import { isMissingProcess } from "./process-state.mjs";
 
 const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
   ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; } };
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return !isMissingProcess(error); } };
 const atomic = (file, data) => {
   const temp = `${file}.${crypto.randomUUID()}.tmp`;
   let fd;
