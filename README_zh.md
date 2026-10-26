@@ -27,17 +27,31 @@ node scripts/install.mjs install --target both
 MCP 提供完整操作入口：
 
 - 默认监督流程：codex_supervise、codex_preflight、codex_host。
-- 项目与任务：codex_projects、codex_threads、codex_start、codex_resolve、codex_status、codex_wait。状态与等待只返回精简、截断后的结果；桌面拒绝等待接口时，会先退回精简的对话读取，再退回会话日志末尾的有限片段，不会读取整个日志。
+- 项目与任务：codex_projects、codex_threads、codex_start、codex_resolve、codex_status、codex_wait。codex_start 在成功验证后返回目标身份；创建后身份检查失败时返回 ok:false、status:needsAttention 和确切的 threadId，应检查同一对话，不要另建替代对话。状态与等待只返回精简、截断后的结果；桌面拒绝等待接口时，会先退回精简的对话读取，再退回会话日志末尾的有限片段，不会读取整个日志。
 - 消息与回执：codex_reply、codex_delivery。
 - 持久跟进：codex_watch、codex_watches、codex_event_context、codex_event_report、codex_events、codex_watch_ack、codex_unwatch、codex_channel_bind。
 
-codex_reply 的 message 始终是委派指令；answers 根据当前问题的 callId 和 index 匹配。已有授权范围内的常规决策使用 answerSource: agent，投递内容保留 Agent 来源。真实用户答案使用 answerSource: user 与 userProvided: true。命令审批仍由用户在 Codex 中处理。
+codex_reply 原样发送消息和问题答案，不添加 Relay 前缀或免责声明。message 发送跟进指令；answers 根据当前问题的 callId 和 index 匹配。答案回执默认记录 answerSource: agent；answerSource: user 或 userProvided: true 可选用于记录人类提供的文本，这些字段不作为发送门槛，也不授予权限。
 
-MCP 是公开的调用入口。内部普通指令使用 Codex 的委派消息工具；结构化问题答案使用能关闭问题卡片的桌面 IPC。将结构化答案改成普通消息转发会留下未关闭的问题，因此不会再静默降级到这种无效路径。打开或聚焦窗口需要明确授权的 allowOpen: true。
+任务和权限边界由人类在监督、分发任务的窗口中确定。Relay 生成的执行文本只包含任务、必要背景、具体决定和执行范围，以及验收条件。Relay 将消息来源、分发关系、路由信息、授权历史、进度汇报和新增授权请求保留在分发会话或内部记录。自动新建时可保留宿主自己的首条消息来源标记，正文仍保持普通工作对话。分发会话在已有范围内自行选择实现、回复提问并继续执行；只有缺少必要的人类输入或决策超出既有范围时，才向人类提问。宿主本身的权限控制仍然生效。
 
-每个预期发送操作应使用稳定 requestId。相同 ID 与相同输入的重试返回已有回执，不重复已完成阶段。不同操作分别使用事件 ID 后加 :answer、:followup 等键。超时或断线后先通过 codex_delivery 与当前任务状态检查投递结果，不用新 ID 绕过不确定状态。答案与后续指令的合并请求分别记录阶段，部分成功后不会重发已完成的答案。
+分发会话须将首条任务、后续指令和问题答复整理成直接的工作文本，不叙述谁说的、谁发送或转达的、来自哪个会话、谁批准的，以及分发和审批流程。这条规则按含义覆盖任何语言和类似口吻，不是固定短语过滤。必要事实和执行限制仍须保留；只有作为任务数据且需要准确措辞的内容才保留原文引用。Relay 原样传输整理后的文本，不进行关键词审查或自动改写。
+
+执行会话在失败后处于已恢复的 systemError 状态时，可以沿用原设置接收普通新回合指令，Relay 不再仅凭该状态要求用户手动点击重试。临时模型容量不足时，分发会话先核对状态和发送回执，再对同一任务、同一模型进行有间隔且有次数限制的重试。未确认提交和投递结果不明仍会阻止盲目重发，只有宿主返回有效接收回执才记录为已发送；这不保证下一次请求一定有可用模型容量。
+
+执行会话的项目绑定用于确认消息收件目标，不把允许修改的文件限制在该项目内。跨目录库修复获准后，默认继续使用原执行会话，正文保留准确路径、修改动作和检查要求，并按需走宿主正常审批路径。不能仅因目录在项目外，就要求添加目录、新建会话或重启。用户明确要求在另一个项目中新建执行会话时，原生创建入口仍有项目确认前置条件；项目发现时的连接错误须按连接故障诊断，不能误报为项目不存在或文件权限拒绝。
+
+用户要求单独新建库修复会话，但未指定它的项目或工作目录时，正常创建沿用已验证的分发项目，任务正文明确外部库路径。仅作为修改目标出现的仓库路径，不自动成为新会话的原生项目，也不自动生成 expectedCwd 断言。用户明确指定的项目和工作目录仍须保持。
+
+MCP 是公开的调用入口。向已有会话发送的跟进指令通过桌面 IPC 走 Codex 的普通输入路径：空闲时开始新回合，运行中追加输入，不在输入中附加委派封装或来源身份。结构化问题答案使用能关闭问题卡片的桌面 IPC。普通输入路径不可用或协议不兼容时，返回实际投递错误；两条路径都不会降级为委派消息。打开或聚焦窗口需要明确授权的 allowOpen: true。改变发送路径不会清除已有会话历史。
+
+监督任务的回复使用唤醒事件的 eventId，或日常监听的 subscriptionId 来定位已保存目标；Relay 会从记录中解析线程、项目和 cwd。若同时提供 threadId，必须与记录一致。事件回复要求事件仍处于活动且未处理状态，并且订阅仍然有效。标题仅作信息显示，重命名不会改变回复目标。写入前会检查保存的项目和实际 cwd。独立回复必须同时提供 threadId 与明确的 projectPath 或 projectId；expectedCwd 可选，用来断言实际工作目录。每个预期发送操作应使用稳定 requestId。相同 ID 与相同输入的重试返回已有回执，不重复已完成阶段。不同操作分别使用事件 ID 后加 :answer、:followup 等键。超时或断线后先通过 codex_delivery 与当前任务状态检查投递结果，不用新 ID 绕过不确定状态。回执包含目标身份，并区分工具发送成功与接收方端到端收到或处理。答案与后续指令的合并请求分别记录阶段，部分成功后不会重发已完成的答案。
+
+没有目标绑定的旧活动订阅，可以在 codex_reply 中提供 eventId 或 subscriptionId、明确的 projectPath 或 projectId，以及可选的 expectedCwd，以验证并绑定目标。完整保存的工作树绑定可通过精确 threadId、cwd 和已登记项目重新验证；即使近期对话列表或读取结果缺少部分项目元数据，也不会阻止匹配。任何明确冲突仍会阻止发送。较旧的不完整普通线程回复回执，只能在活动订阅验证或修复目标绑定后，使用完全相同的参数和 requestId 重试；仅继续尚未完成的写入阶段，不确定阶段仍会阻止重发。若请求的所有写入都已发送，只缺最终回执，完全相同的重试会本地重建回执，不访问桌面或检查当前事件，即使事件已确认或订阅已移除也不会再发送。历史回执不会伪造目标身份。
 
 ## 持久监听与自动跟进
+
+跟进消息只表达下一步工作，例如“运行约定的检查”“采用现有接口”“继续下一步”。审批证据留在分发端或内部记录，执行消息保留必要的操作范围。监督流程集中在已安装 Skill 中；共享 MCP 初始化说明保持角色中立，执行会话不会仅因加载插件就取得监督职责。日常问题由分发会话答复。消息送达不代表已经开工或宿主审批通过；若宿主实际拒绝，按其真实要求处理。
 
 默认使用**当前对话监督另一个执行对话**。只需告诉 Agent 是新开还是使用哪个现有 Codex 对话、做什么，以及做到什么程度，例如：
 
@@ -45,7 +59,13 @@ MCP 是公开的调用入口。内部普通指令使用 Codex 的委派消息工
 
 > 让已有的「数据库迁移」对话继续完成迁移，持续跟进到约定的迁移检查通过。
 
-Agent 会调用 codex_supervise 自动完成当前宿主身份识别、项目和精确对话名称解析、桌面桥接及调用上下文检查、模型档位检查、CLI 能力探测、唤醒方式选择和持久监听注册。用户无需指定工具、会话 ID、可执行文件路径或唤醒模式。执行后端目前仍是本机 Codex Desktop；Codex 或 Claude Code 都可作为监督宿主。
+Agent 会调用 codex_supervise 自动完成当前宿主身份识别、项目和精确对话名称解析、桌面桥接及调用上下文检查、模型档位检查、CLI 能力探测、唤醒方式选择和持久监听注册。设置时必须核验确切的已有项目。用户未指定项目时，只能根据已验证的监督 cwd 解析项目；不能直接采用所选执行对话所属的项目。明确指定项目即可授权跨项目工作。设置记录会保存目标的 threadId、hostId、标题、projectId、项目路径和实际 cwd；可选 expectedCwd 用来断言工作目录，它可能因工作树而不同于项目路径。相同 requestId 的重试始终绑定首次选择的目标、项目和 cwd，不会重新按标题搜索。用户无需指定工具、会话 ID、可执行文件路径或唤醒模式。执行后端目前仍是本机 Codex Desktop；Codex 或 Claude Code 都可作为监督宿主。
+
+list_projects 可能漏掉已有项目。可用 codex_projects({projectPath:"<预期绝对路径>"}) 定向核验，preflight、supervise、start 和目标绑定也共用这条解析路径：按已有本机会话的确切 ID 读取真实 cwd，并结合会话的项目 ID 核对。漏项本身不再导致拦截；身份或目录冲突、根目录歧义仍会拦截，不会改选其他项目或最近会话。已有完整绑定仍按原会话 ID、项目路径和 cwd 接续。Git 元数据确认的 linked worktree cwd 不会被当作缺失项目的根目录；已核验的设置或创建回执会保留原项目根目录。指定的旧会话即使不在近期列表中，也会按确切 ID 读取核验。
+
+项目归属、实际 cwd 和允许使用的源仓库是不同概念。将对话移到其他项目，不代表其工作目录已经改变。
+
+自动新建通过桌面原生 create_thread 路径完成。首条正文按普通对话表达任务和完成条件，不添加 Relay 标题、监督身份、来源叙述或授权解释。宿主可以保留“来自其他 ChatGPT 聊天”这类自身来源标记，这属于已接受的边界。之后的跟进走普通桌面输入。工作树尚未完成创建或后续设置失败时，已保存请求仍绑定同一个已创建会话；创建成功本身不代表任务已经开始执行。调查与限制见 [普通新建入口说明](docs/ordinary-creation.md)。
 
 每次通过 MCP 设置监督流程时，Agent 都会先在当前宿主的 Shell 中运行一次已安装 CLI 的 host 命令，将实际 host、threadId 或 sessionId、cwd，以及适用的 fastDisabled 字段传为 supervisor。共享 MCP 进程可能保留启动时的旧会话 ID，因此 codex_host 会标记 requiresShellVerification:true，不能据此认定当前调用对话。不会整份传入 host 输出中的兼容字段或 runtime，不会猜测最近的聊天或会话文件，也不会把查 ID 的工作交回用户。直接使用 CLI supervise 时，可默认读取它实际所在 Shell 的环境。
 
@@ -57,7 +77,13 @@ codex_preflight 可单独检查无人值守条件，不会发送测试消息或�
 
 **要求整个会话使用 Standard，不启用 Fast。** 在创建或接管时检查执行会话和 Codex 监督会话的档位，包括 queue 监督方式；之后的普通消息继承会话设置，不逐条设置或检查模型档位，queue 也不附加每条消息的档位覆盖参数。Claude resume 在启动恢复进程时通过 CLAUDE_CODE_DISABLE_FAST_MODE=1 和 fastMode:false 关闭恢复会话的 Fast；Claude Channel 需要从其宿主 Shell 验证整个监督会话已禁用 Fast。桌面接口没有会话档位设置方法，因此已知 Fast 或档位未知时会阻止流程，不能声称已自动改成 Standard。流程保留模型和推理强度，不修改全局模型配置；配置检查也不冒充服务端实际使用档位的回执。
 
-高级调用方仍可直接通过 codex_watch 注册被监听的 Codex threadId 和明确的监督会话。监督 Codex 对话必须使用不同的 threadId，不能自我监听。手动 queue 模式需提供已验证的 Codex CLI 绝对路径。排队成功不代表 Agent 已处理完成，仍须等待确认。Queue 适配器使用隔离假 CLI 测试，不能声称所有真实 Codex 版本都已通过实际发送验收。
+部分桌面版本的 read_thread 和保存的回合上下文都不提供会话档位。Relay 通过桌面现有的状态同步协议，从目标会话的 owner 读取已完成更新的 latestThreadSettings.serviceTier；仅消费一次快照，只返回档位证据，随后取消订阅并关闭连接。读取总时限为五秒，单帧上限为 8 MiB；协议不兼容、设置缺失、档位未知或存在冲突的加速证据时继续阻断。此适配已在 Windows 实际验证；macOS／Linux 只有隔离路径测试。设计与边界见 [会话策略适配说明](docs/session-policy.md)。
+
+没有可用入口提供档位时，预检返回 SESSION_TIER_UNAVAILABLE，保留请求 ID 并阻止启动；反复切换档位、原样重试或修改全局默认值，都不能补上缺失的当前会话证据。明确读到加速档位时返回 SESSION_TIER_ACCELERATED；读到无法识别的档位值时返回 SESSION_TIER_UNRECOGNIZED。
+
+高级调用方仍可直接通过 codex_watch 注册被监听的 Codex threadId、明确的 projectPath 或 projectId，以及监督会话。监督 Codex 对话必须使用不同的 threadId，不能自我监听。手动 queue 模式需提供已验证的 Codex CLI 绝对路径。排队成功不代表 Agent 已处理完成，仍须等待确认。Queue 适配器使用隔离假 CLI 测试，不能声称所有真实 Codex 版本都已通过实际发送验收。
+
+没有目标绑定的旧活动订阅有两种修复方式：在 codex_reply 中提供 eventId 或 subscriptionId 及明确的项目选择来验证并绑定目标；或者在 codex_watch 中将 id 设为原订阅 ID，并提供完全相同的原监督会话和明确的目标项目。两种方式都会保留监听状态和事件历史。重新注册会保留非活动状态；只有明确获准恢复监听时才设置 enabled: true。不要重试已完成的 codex_supervise，因为它会返回旧回执。旧回执仍是历史记录，不会伪造补入新的目标身份。
 
 手动配置 Claude Code 监听时，有两种模式：
 
@@ -70,7 +96,7 @@ codex_preflight 可单独检查无人值守条件，不会发送测试消息或�
 {"relayEvent":1,"eventId":"<event ID>","subscriptionId":"<subscription ID>","type":"turnEnded"}
 ```
 
-完整报告、任务目标以及整段操作规则不再复制到每条通知中。固定处理规则集中在 Skill 和 MCP 初始化说明里。监督 Agent 收到事件后：
+完整报告、任务目标以及整段操作规则不再复制到每条通知中。固定处理规则由分发会话从已安装 Skill 加载。监督 Agent 收到事件后：
 
 1. 一次调用 codex_event_context，组合读取该事件的持久确认状态、已保存目标和策略，以及当前任务的精简状态。已确认事件返回 handled:true、nextAction:skip，不再查询桌面。
 2. 根据当前状态和预览决定下一步。返回 reconcile 或 retryStatus 时先处理对应问题；捕获时的快照不是当前状态证明，也不是新的用户授权。不再按惯例依次读取 codex_events 和 codex_status，重复取得相同正文。
@@ -98,7 +124,7 @@ node cli.mjs uninstall
 
 上面的路径表示从源码目录执行；安装后的 Skill 提供真实绝对路径，也可用 Bun 执行。
 
-CLI 备用入口支持 preflight、supervise、event-context 和 event-report 的 --input-file JSON 调用，与 MCP 共用相同流程。正常操作优先走 MCP。
+CLI 备用入口支持 preflight、supervise、event-context 和 event-report 的 --input-file JSON 调用，与 MCP 共用相同流程。watch 必须为目标明确指定已登记的 projectPath 或 projectId。reply 支持仅用 --input-file 指定包含 eventId 或 subscriptionId 的文件；旧式位置参数线程调用必须明确指定项目。正常操作优先走 MCP。
 
 | 检查状态 | 含义 |
 | --- | --- |
@@ -116,6 +142,19 @@ CLI 备用入口支持 preflight、supervise、event-context 和 event-report �
 更新到精简事件流程后，监督会话的 MCP 连接也需要加载新版工具和初始化说明；仍在运行的旧 MCP 进程可能尚不提供 codex_event_context。事件 ID、处理确认历史、发送回执和重启恢复均保留。原 codex_events 与 codex_status 继续作为兼容和手动诊断入口。
 
 uninstall 停止服务、移除登录启动器及自身管理的 MCP、Skill、安装记录和可移除源码，保留无关设置、Codex 任务数据、日志、持久事件与消息回执。重新安装可能恢复保留的订阅，应先确认这些旧订阅仍然需要。发现用户修改了受管理内容时保留修改并报告冲突。
+
+## 源码目录
+
+公开启动入口继续保留在根目录：`cli.mjs`、`mcp.mjs`、`claude-mcp.mjs`、`relay-server.mjs`、`relay-cli.mjs`、`codex-wait.mjs`、`daemon.mjs` 和 `service.mjs`。内部模块按职责放入 `src/`：
+
+| 目录 | 职责 |
+| --- | --- |
+| `src/tasks/` | CLI 与 MCP 共用的任务操作、监督流程、目标和项目解析、会话策略、报告及消息回执 |
+| `src/desktop/` | Codex 桌面客户端、普通输入 IPC 和桥接传输 |
+| `src/watch/` | 监听引擎与存储、监督会话唤醒和后台服务通信 |
+| `src/runtime/` | 运行路径、SQLite 访问和进程状态 |
+
+安装脚本、技能说明、补充文档和隔离测试分别保留在 `scripts/`、`skills/`、`docs/` 和 `test/`。安装器将完整的嵌套源码放入不可变安装快照，并在更新实际集成前验证必需模块。
 
 ## 验证与边界
 

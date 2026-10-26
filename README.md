@@ -33,9 +33,9 @@ The result includes `runtime`, `release`, `stateFile`, and `service`. Use the re
 | `codex_supervise` | Check readiness, create/select an executor, and register durable follow-up from the current conversation |
 | `codex_preflight`, `codex_host` | Inspect unattended prerequisites and MCP startup identity that requires current-shell verification |
 | `codex_projects`, `codex_threads` | Select an existing Codex project or chat |
-| `codex_start`, `codex_resolve` | Start a task and resolve queued worktree creation |
+| `codex_start`, `codex_resolve` | Start a task, return validated target identity when available, and resolve queued worktree creation |
 | `codex_status`, `codex_wait` | Read current state or perform a bounded wait. Results are compact and clipped; if the desktop rejects its wait API, they fall back to a compact thread read, then to a bounded tail of the session log, never the whole log |
-| `codex_reply` | Send a delegated instruction or answer the target's pending questions |
+| `codex_reply` | Send a follow-up instruction or answer the target's pending questions |
 | `codex_delivery` | Inspect a persistent outgoing receipt by `requestId` |
 | `codex_watch`, `codex_watches` | Register and inspect durable subscriptions |
 | `codex_event_context` | Read one durable event, its acknowledgment state, saved goal, and compact current task state in one call |
@@ -43,13 +43,27 @@ The result includes `runtime`, `release`, `stateFile`, and `service`. Use the re
 | `codex_events`, `codex_watch_ack`, `codex_unwatch` | Inspect event history, acknowledge handling, and remove a watch |
 | `codex_channel_bind` | Bind an explicitly enabled Claude channel to its actual session |
 
-Tool names may appear with the host's MCP namespace. Use `codex_reply` as the main sending path. `message` remains a delegated instruction; `answers` are matched to exact `callId` and `index` values from current state. For routine decisions within the user's delegated scope, use `answerSource:"agent"`. For actual human answers, use `answerSource:"user"` with `userProvided:true`. The delivered text preserves agent provenance. Command approvals remain with the user in Codex.
+`codex_start` returns a validated target identity when available. If validation fails after creation, it returns `ok:false`, `status:"needsAttention"`, and the exact created `threadId`; inspect that chat and continue with it rather than starting a replacement.
 
-Supply a stable `requestId` for each intended reply. Retrying with that ID and identical input returns its stored receipt rather than repeating completed stages. Different input requires a different ID. Timeouts and disconnects after dispatch may be uncertain; inspect `codex_delivery({requestId})` and target state before any replacement request. A combined answers-plus-message request records its stages independently, so a completed answer stage is not repeated after an instruction failure. Use distinct event-derived keys such as `<eventId>:answer` and `<eventId>:followup` for distinct operations.
+Tool names may appear with the host's MCP namespace. Use `codex_reply` as the main sending path. Messages and answers are delivered verbatim without Relay prefixes or disclaimers. `message` sends an instruction; `answers` are matched to exact `callId` and `index` values from current state. Answers default to `answerSource:"agent"` in receipts; `answerSource:"user"` or `userProvided:true` optionally records human-supplied text. These fields do not gate delivery or grant permissions.
 
-MCP is the public interface. Internally, ordinary instructions use Codex's delegated-message tool; structured question answers use the card-aware desktop IPC path. That IPC is necessary to close the question cards and cannot be replaced by forwarding the same text as an ordinary message. Answers no longer silently fall back to that ineffective path. Window opening requires `allowOpen:true` and the user's authorization.
+The user defines the task and authority in the supervising conversation. Relay-generated execution text contains only work instructions: the task, necessary context, concrete decisions and limits, and acceptance criteria. Relay keeps sender identity, delegation and routing details, authorization history, progress reporting, and new authorization requests in the supervising conversation or internal records. Native new-chat creation retains the host's first-message attribution, as described below. The supervisor resolves routine choices within scope. Missing user input or decisions beyond that scope return to the supervising conversation. The host's permission controls remain in effect; an actual host rejection is reported with its stated requirement.
+
+For supervised replies, identify the saved target with `eventId` for a wake or `subscriptionId` for ordinary monitoring; Relay resolves its thread and saved project/cwd when a binding exists. A supplied `threadId` must agree. Event replies require an active, unhandled event and an active subscription. For an older active subscription without a target binding, include an explicit intended `projectPath` or `projectId`; optional `expectedCwd` asserts the actual workspace and allows Relay to verify and attach the target. A full saved worktree binding can be revalidated from its exact thread ID, `cwd`, and verified project even when partial recent/read metadata omits the project. Any explicit conflict still blocks. The title is informational, so a rename does not redirect a reply. A standalone reply must include `threadId` and an explicit `projectPath` or `projectId`. Supply a stable `requestId` for each intended reply. Retrying with that ID and identical input returns its stored receipt rather than repeating completed stages. Different input requires a different ID. Timeouts and disconnects after dispatch may be uncertain; inspect `codex_delivery({requestId})` and target state before any replacement request. Receipts include target identity and distinguish tool delivery success from end-to-end confirmation that the recipient consumed or handled the message. A combined answers-plus-message request records its stages independently, so a completed answer stage is not repeated after an instruction failure. Use distinct event-derived keys such as `<eventId>:answer` and `<eventId>:followup` for distinct operations.
+
+MCP is the public interface. Follow-up instructions to existing chats use Codex's normal desktop input through IPC: start a turn when idle and steer the active turn when running, without adding a delegation wrapper or source identity to the input. Structured question answers use the card-aware desktop IPC path to close their question cards. An unavailable or incompatible input path returns an error; neither path falls back to delegated messaging. Window opening requires `allowOpen:true` and the user's authorization. Existing chat history is not cleared by changing the message path.
 
 ## Persistent monitoring and automatic follow-up
+
+Follow-up contains only the next work instruction, such as "Run the agreed checks" or "Use the existing interface". Approval evidence stays in supervisor/internal records; necessary execution limits stay in the instruction. The installed Skill contains the supervision workflow. Shared MCP initialization remains role-neutral, so an executor does not acquire supervisory duties just by loading the plugin. Routine questions return to the supervisor; an actual host approval rejection still follows the host's required action. A delivery receipt does not establish that execution started or approval passed.
+
+The supervisor composes initial tasks, follow-ups, and answers as direct work text, without narration about speakers, senders, source chats, approvals, or supervision. This rule covers equivalent wording in any language; it is not a phrase filter. Necessary facts and limits remain, and exact quotations are retained when needed as task data. Relay transports the composed text verbatim without keyword review or automatic rewriting.
+
+A resumed executor in `systemError` after a failed run can receive a normal new-turn instruction with inherited settings. Relay does not require a manual Retry click solely because of that state. For transient model-capacity failures, the supervisor checks status and delivery receipts, then uses bounded retries with backoff on the same task and model. Unconfirmed submissions and uncertain delivery still prevent blind resending; a valid owner acceptance is required to record delivery. This does not guarantee that model capacity is available on the next attempt.
+
+The recipient's project binding identifies where to send work; it does not restrict the task's editable files to that project. For an authorized external-library fix, keep the same executor by default and send its exact paths, actions, and checks. Host permissions still apply through the normal approval path. Project attachment, a new executor, and a restart are not automatic prerequisites. Explicitly requested native creation in a different project has its own setup requirements; discovery connection errors must be diagnosed as connectivity failures rather than missing projects or filesystem denials.
+
+If the user requests a separate library-fix executor without specifying its project or working directory, normal creation uses the verified supervisor project while the task names the external library. A repository mentioned as an edit target does not itself select a new native project or assert `expectedCwd`. Explicit user selections remain binding.
 
 Tell the agent the target choice, task, and acceptance condition, for example:
 
@@ -57,7 +71,11 @@ Tell the agent the target choice, task, and acceptance condition, for example:
 
 > Have the existing chat "Database migration" complete the migration. Keep following it until the agreed migration checks pass.
 
-The default workflow uses `codex_supervise`, with the current Codex or Claude Code conversation as supervisor and a separate Codex desktop chat as executor. It resolves the requested project and exact existing title, checks the desktop bridge/caller and model policy, discovers and probes available CLI capabilities without sending a test message, selects a wake adapter, and starts/registers monitoring after checks pass. It persists the task, acceptance condition, and operation stages. Repeating the same stable operation ID does not create a second execution chat after a pending worktree or partial failure. The execution backend is still Codex; Claude Code is a supervising host.
+The default workflow uses `codex_supervise`, with the current Codex or Claude Code conversation as supervisor and a separate Codex desktop chat as executor. It resolves the requested project and exact existing title, checks the desktop bridge/caller and model policy, discovers and probes available CLI capabilities without sending a test message, selects a wake adapter, and starts/registers monitoring after checks pass. Setup requires the exact existing project. When `list_projects` omits it, the shared resolver verifies existing local chats by exact ID with `read_thread`, combining their actual directory and project membership. `codex_projects({projectPath:"<intended absolute path>"})` performs the same targeted discovery. Conflicting identities, directories, or ambiguous roots still block. Linked worktree metadata is checked read-only: an unbound member cwd cannot become the missing project root. Verified setup/creation receipts preserve their original root across partial listings. Exact requested chats can supply evidence outside recent results; unrelated unavailable partial rows cannot invalidate that evidence. If the user leaves the project implicit, the workflow resolves only the verified supervisor `cwd`; it does not adopt a selected executor's project. An explicit project choice permits cross-project work. The setup record saves the resolved target's thread ID, host ID, title, project ID/path, and actual `cwd`; optional `expectedCwd` asserts the required workspace, which may differ from the project path for a worktree. Retries with the same request ID remain bound to that first target, project, and `cwd`; they do not search the title again. The workflow persists the task, acceptance condition, and operation stages. Repeating the same stable operation ID does not create a second execution chat after a pending worktree or partial failure. The execution backend is still Codex; Claude Code is a supervising host.
+
+Project grouping, actual `cwd`, and allowed source repositories are separate. Moving a chat between projects does not prove its working directory changed.
+
+Automatic new-chat creation uses the native desktop `create_thread` path. Its first-message body contains the task followed by the finish condition as normal conversation text, with no Relay headings, supervision roles, source narration, or authorization explanation. The host may retain its own attribution that the message came from another ChatGPT chat; that host attribution is within the supported boundary. Later instructions use ordinary desktop input. Pending worktree creation or a later setup failure stays bound to the exact created chat; creation alone does not establish that the task started. See [ordinary creation research and limitations](docs/ordinary-creation.md).
 
 For every MCP setup, the agent runs installed `cli.mjs host` once in the current host's shell and supplies its verified `host`, `threadId` or `sessionId`, `cwd`, and applicable `fastDisabled` fields as `supervisor`. A shared MCP process can retain a stale startup-session ID, so `codex_host` marks its inherited identity as `requiresShellVerification:true`; it does not attest which conversation invoked the tool. The agent does not copy compatibility/runtime fields into the supervisor, select the latest chat as a substitute, or send the user to discover IDs and paths. CLI `supervise` can use its actual shell environment by default. `codex_preflight` is available for readiness inspection alone. A blocked result is actionable information, not unattended readiness. The agent reports the concrete prerequisite rather than blindly creating a task or registering a nonworking loop.
 
@@ -65,11 +83,16 @@ Wake selection prefers a supported Codex queue, then an available loaded desktop
 
 **Standard is required for the entire session; the workflow does not enable Fast.** At creation or takeover, it checks Standard for the executor and Codex supervisor, including queue supervision. Ordinary messages inherit the session setting; queue calls do not set a per-message tier, and the workflow does not repeat model checks for every message. Claude resume sets `CLAUDE_CODE_DISABLE_FAST_MODE=1` and `fastMode:false` at process startup for the restored session. Live Claude channels need verified Fast-disabled state from their host shell. Native desktop APIs cannot set an existing session's tier, so Fast or unknown session state blocks the workflow rather than being silently changed. Model and reasoning choices are preserved, global model settings are not rewritten, and configuration evidence is not a provider receipt of the tier served.
 
-For advanced callers, lower-level `codex_watch` accepts a real target ID and a separate supervisor. Codex example:
+Some desktop versions omit the session tier from both `read_thread` and saved turn contexts. Relay reads the selected session owner's settled `latestThreadSettings.serviceTier` through the desktop's existing state-sync protocol. It consumes one snapshot, returns only tier evidence, then unsubscribes and closes the connection. Reads have a five-second deadline and an 8 MiB frame limit; incompatible versions, missing settings, unknown values, and conflicting accelerated evidence remain blocked. This adapter has live Windows verification; macOS/Linux socket paths have isolated coverage only. See [session policy adapter](docs/session-policy.md).
+
+When no supported reader exposes the session tier, preflight returns `SESSION_TIER_UNAVAILABLE`, keeps setup blocked, and preserves the setup request ID. Repeated tier toggles, unchanged retries, or global default edits cannot establish the missing session evidence. An explicit accelerated tier instead returns `SESSION_TIER_ACCELERATED`; an exposed but unrecognized value returns `SESSION_TIER_UNRECOGNIZED`.
+
+For advanced callers, lower-level `codex_watch` requires a real target ID, an explicit intended `projectPath` or `projectId`, and a separate supervisor. Codex example:
 
 ```json
 {
   "threadId": "<watched Codex threadId>",
+  "projectPath": "<explicit intended project path>",
   "supervisor": { "host": "codex", "threadId": "<supervising Codex threadId>" }
 }
 ```
@@ -86,6 +109,7 @@ For manual Claude Code watch registration, choose an explicit wake mode:
 ```json
 {
   "threadId": "<watched Codex threadId>",
+  "projectPath": "<explicit intended project path>",
   "supervisor": {
     "host": "claude",
     "sessionId": "<actual Claude sessionId>",
@@ -96,13 +120,17 @@ For manual Claude Code watch registration, choose an explicit wake mode:
 }
 ```
 
+Older persisted active subscriptions without a target binding can be repaired in two ways: `codex_reply` can verify and attach the target when given its `eventId` or `subscriptionId` plus an explicit project selector, or `codex_watch` can re-register with `id` set to the existing subscription ID, the exact original supervisor, and the explicitly intended project. Both preserve watch state and event history. Re-registration preserves an inactive watch; set `enabled:true` only when explicitly authorized to resume it. Do not retry a completed `codex_supervise` request for this repair, because it replays the saved receipt. Legacy receipts remain historical and are not rewritten to invent target identity.
+
+An older incomplete plain-thread reply receipt can resume with identical arguments and `requestId` only after an active subscription has verified or repaired that target binding. Only pending write stages resume; uncertain stages remain blocked. If all requested writes were already delivered but the final receipt is missing, an identical retry reconstructs the receipt without desktop access or current-event checks, even after acknowledgment or subscription removal, and sends nothing. No target identity is fabricated for a historical receipt.
+
 The daemon persists an outbox before waking a host. It detects questions, attention, and terminal turns, including different turns whose final text is identical. Events move through `pending`, `dispatching`, and `delivered`, then await explicit acknowledgment. A wake contains only an envelope such as:
 
 ```json
 {"relayEvent":1,"eventId":"<event ID>","subscriptionId":"<subscription ID>","type":"turnEnded"}
 ```
 
-Reports, saved goals, and repeated workflow instructions are not copied into every notification. The Skill and MCP initialization provide the handling rules once. Handling follows this loop:
+Reports, saved goals, and repeated workflow instructions are not copied into every notification. The supervisor loads the installed Skill for the handling rules. Handling follows this loop:
 
 1. Call `codex_event_context({eventId})` once. It combines durable acknowledgment state, saved goal/policy, and a fresh compact task state. Already acknowledged events return `handled:true` and `nextAction:"skip"` without querying the desktop again.
 2. Use the returned preview and current state. Follow `reconcile` or `retryStatus` when returned; a captured snapshot is not proof of current state or new authority. Do not routinely repeat the same reads through `codex_events` and `codex_status`.
@@ -130,13 +158,26 @@ node cli.mjs update
 node cli.mjs uninstall
 ```
 
-CLI fallback commands also expose `preflight`, `supervise`, `projects`, `threads`, `start`, `resolve`, `status`, `wait`, `reply`, `watch`, `watches`, `event-context`, `event-report`, `events`, `ack`, and `unwatch`. Use `delivery --request-id <id>` to inspect an outgoing receipt. Structured operations take `--input-file` JSON; use `help` for exact arguments. CLI fallback and MCP share logic and validation. Legacy `claude-mcp.mjs`, `relay-cli.mjs`, and `codex-wait.mjs` entry points remain available.
+CLI fallback commands also expose `preflight`, `supervise`, `projects`, `threads`, `start`, `resolve`, `status`, `wait`, `reply`, `watch`, `watches`, `event-context`, `event-report`, `events`, `ack`, and `unwatch`. Use `delivery --request-id <id>` to inspect an outgoing receipt. Structured operations take `--input-file` JSON; `watch` requires an explicit registered target `projectPath` or `projectId`. For `reply`, the file can stand alone when it contains `eventId` or `subscriptionId`; the legacy positional thread form requires an explicit project selector. Use `help` for exact arguments. CLI fallback and MCP share logic and validation. Legacy `claude-mcp.mjs`, `relay-cli.mjs`, and `codex-wait.mjs` entry points remain available.
 
 Installation state lives at `~/.codex-relay/install.json`, releases at `releases/`, durable watches at `watches/state.json`, reply receipts at `outgoing/`, and service logs at `watch-service.log`. `CODEX_RELAY_HOME` overrides that root; `CODEX_HOME` selects Codex config/state. The adapter detects numbered Codex state databases or accepts an explicit `CODEX_RELAY_STATE_DB`. Pipe overrides are for known adapters/tests, not values to guess.
 
 Updates stop the existing watcher, switch managed source/configuration, and restart it with durable state preserved. Uninstall stops the service, removes its login launcher and managed integration, and preserves task data and durable records. Conflicting user edits are preserved by refusing the operation. Full details and recovery procedures are in [INSTALL.md](INSTALL.md).
 
 After updating to the compact event workflow, let the supervisor's MCP connection load the updated tools and initialization instructions. An older loaded MCP process may not expose `codex_event_context` yet. Acknowledgment replies contain only receipt metadata and never echo the captured report. Durable event IDs, acknowledgment history, reply receipts, and restart recovery are preserved; existing `codex_events` and `codex_status` calls remain available for compatibility and manual diagnostics.
+
+## Source layout
+
+Public executable paths remain at the repository root: `cli.mjs`, `mcp.mjs`, `claude-mcp.mjs`, `relay-server.mjs`, `relay-cli.mjs`, `codex-wait.mjs`, `daemon.mjs`, and `service.mjs`. Internal modules live under `src/`:
+
+| Directory | Responsibility |
+| --- | --- |
+| `src/tasks/` | Shared CLI/MCP task operations, supervision, target and project resolution, session policy, reports, and reply receipts |
+| `src/desktop/` | Codex desktop client, ordinary input IPC, and bridge transport |
+| `src/watch/` | Watch engine and storage, supervisor wake adapters, and background service communication |
+| `src/runtime/` | Runtime paths, SQLite access, and process state |
+
+Installation scripts remain in `scripts/`, instructions in `skills/`, supporting documentation in `docs/`, and isolated tests in `test/`. The installer includes the nested source tree in each immutable release and validates its required modules before changing the installed integration.
 
 ## Supported environment and verification
 
