@@ -1,5 +1,5 @@
 // Backward-compatible low-level diagnostic entry. Prefer cli.mjs for workflows.
-import { relay } from "./transport.mjs";
+import { relay } from "./src/desktop/transport.mjs";
 const [command, ...rest] = process.argv.slice(2);
 try {
   let result;

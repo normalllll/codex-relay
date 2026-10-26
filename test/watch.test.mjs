@@ -6,8 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { WatchStore } from "../watch-store.mjs";
-import { WatchEngine } from "../watch-engine.mjs";
+import { WatchStore } from "../src/watch/watch-store.mjs";
+import { WatchEngine } from "../src/watch/watch-engine.mjs";
 
 function fixture(t, options) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-relay-watch-"));
@@ -23,6 +23,34 @@ function fixture(t, options) {
 
 const question = (callId = "call_a", turnId = "turn_a", index = 0) => ({ threadId: "target", turnId, turnStatus: "inProgress", questions: [{ callId, index, question: "Which option?" }] });
 const completed = (turnId = "turn_a") => ({ threadId: "target", turnId, turnStatus: "completed", latestMessage: { text: "Done" } });
+
+test("verified target bindings cannot be replaced, erased, or reduced to incomplete metadata", (t) => {
+  const { store, home, subscription } = fixture(t);
+  const target = { threadId: "target", hostId: "local", title: "Original", projectId: "project", projectPath: home, cwd: home };
+  store.subscribe({ ...subscription, target });
+  store.subscribe({ ...subscription, target: { ...target, title: "Renamed" } });
+  assert.equal(store.get(subscription.id).target.title, "Renamed");
+  for (const patch of [{ cwd: path.join(home, "another") }, { projectId: "other" }, { threadId: "other" }])
+    assert.throws(() => store.subscribe({ ...subscription, target: { ...target, ...patch } }), /binding/);
+  for (const invalid of [null, { threadId: "target", hostId: "local" }])
+    assert.throws(() => store.subscribe({ ...subscription, target: invalid }), /verified target binding/);
+  store.subscribe(subscription);
+  assert.equal(store.get(subscription.id).target.cwd, home);
+});
+
+test("binding an old subscription preserves watch history and cannot reactivate a completed task", (t) => {
+  const { store, home, subscription } = fixture(t);
+  const [event] = store.observe(subscription.id, question());
+  const before = store.get(subscription.id);
+  const target = { threadId: subscription.threadId, hostId: "local", title: "Target", projectId: "project", projectPath: home, cwd: home };
+  const bound = store.bindTarget(subscription.id, target);
+  assert.deepEqual({ ...bound, target: undefined }, { ...before, target: undefined });
+  assert.equal(store.events()[0].id, event.id);
+  store.ack({ eventId: event.id, action: "complete" });
+  assert.throws(() => store.bindTarget(subscription.id, target), /inactive/);
+  store.subscribe({ id: subscription.id, threadId: subscription.threadId, supervisor: subscription.supervisor, target });
+  assert.equal(store.get(subscription.id).enabled, false);
+});
 
 test("questions are durably deduplicated across engine restarts and rearmed after acknowledgment", async (t) => {
   const { home, store } = fixture(t);
@@ -166,7 +194,7 @@ test("stale process locks recover, while a live owner is not displaced", (t) => 
 
 test("separate Node/Bun processes serialize updates without losing subscriptions", async (t) => {
   const { home, store } = fixture(t);
-  const module = new URL("../watch-store.mjs", import.meta.url).href;
+  const module = new URL("../src/watch/watch-store.mjs", import.meta.url).href;
   const children = Array.from({ length: 3 }, (_, worker) => {
     const script = `import {WatchStore} from ${JSON.stringify(module)};const s=new WatchStore(${JSON.stringify(home)});for(let n=0;n<8;n++)s.subscribe({id:'worker-${worker}-'+n,threadId:'target-${worker}-'+n,supervisor:{host:'claude',sessionId:'session-${worker}'}});`;
     return spawn(process.execPath, ["--input-type=module", "-e", script], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });

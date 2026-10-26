@@ -1,16 +1,19 @@
 // Shared Codex Relay client: talks to the relay control pipe, picks a loaded caller thread,
 // and builds the compact status views used by claude-mcp.mjs and codex-wait.mjs.
-import { openReadOnlyDatabase } from "./sqlite.mjs";
-import { relayHome, codexHome } from "./paths.mjs";
+import { openReadOnlyDatabase } from "../runtime/sqlite.mjs";
+import { relayHome, codexHome } from "../runtime/paths.mjs";
 import { relay } from "./transport.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { discoverProject } from "../tasks/project-discovery.mjs";
 
 const ANSWERED_FILE = path.join(relayHome, "answered-calls.json");
 const MAX_CALLER_ATTEMPTS = 8;
 const MESSAGE_CHARS = 600;
 const QUESTION_POLL_MS = 20_000;
+// The desktop API caps recent entries separately from the complete pinned list.
+export const MAX_RECENT_THREADS = 50;
 
 // ---- Caller thread selection ----
 let callers = [];
@@ -102,17 +105,14 @@ export async function callApp(tool, args, options) {
 // ---- Compact views ----
 export const clip = (text, limit = MESSAGE_CHARS) =>
   text && text.length > limit ? `${text.slice(0, limit)}…` : (text ?? null);
-const normalize = (p) => path.resolve(p).replace(/^\\\\\?\\/, "").toLowerCase();
 
 export async function resolveProject(args) {
+  return (await resolveProjectDetails(args)).projectId;
+}
+
+export async function resolveProjectDetails(args) {
   if (args.projectId && args.projectPath) throw new Error("Pass projectPath or projectId, not both");
-  if (args.projectId) return args.projectId;
-  if (!args.projectPath) throw new Error("Pass projectPath or projectId");
-  if (!path.isAbsolute(args.projectPath)) throw new Error("projectPath must be absolute");
-  const { projects } = await callApp("list_projects", {});
-  const match = projects.find((project) => project.path && normalize(project.path) === normalize(args.projectPath));
-  if (!match) throw new Error(`No Codex project at ${args.projectPath}; add it as a project in Codex first`);
-  return match.projectId;
+  return discoverProject(args, { callApp, threadLimit: MAX_RECENT_THREADS });
 }
 
 // ---- Question bookkeeping ----

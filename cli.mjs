@@ -20,18 +20,18 @@ export const help = {
   name: "codex-relay", version: "0.6.0", output: "One JSON result on stdout; errors have ok:false and exit code 1. Help is JSON too.",
   execution: "Run this file directly with the absolute Node or Bun executable. No build, package install, or global PATH changes.",
   commands: {
-    projects: "projects",
+    projects: "projects [--project <absolute-path> | --project-id <id>] (verify one project, including catalogue omissions)",
     threads: "threads [--project <absolute-path>] [--limit 1..50]",
     start: "start (--project <absolute-path> | --project-id <id>) --prompt-file <UTF-8-file> [--title <text>] [--worktree]",
     status: "status <threadId>",
     wait: "wait <threadId> [--timeout-minutes 0..60] [--past-attention] (run in background for long waits)",
-    reply: "reply <threadId> --input-file <JSON-file> [--user-provided] [--allow-open]; JSON: {message?:string,answers?:[{callId,index,text}]}",
-    resolve: "resolve <pendingClientThreadId>",
+    reply: "reply [<threadId>] --input-file <JSON-file>; supervised JSON uses subscriptionId or eventId; standalone requires --project <absolute-path> or --project-id <id>; optional JSON expectedCwd asserts workspace",
+    resolve: "resolve <pendingClientThreadId> [--project <absolute-path> | --project-id <id>] (uses saved creation binding; legacy pending IDs require an explicit project)",
     info: "info (read-only bridge connectivity)",
     host: "host (read current host/session environment for watch registration; never guesses a session)",
     preflight: "preflight --input-file <JSON target/project/current supervisor> (read-only unattended readiness)",
     supervise: "supervise --input-file <JSON {requestId,task,doneWhen,createNew:true or threadId or threadTitle,projectPath?,supervisor?}> (automatic check/create/select/watch)",
-    watch: "watch --input-file <JSON {threadId,supervisor:{host,threadId or sessionId,mode,cwd,executable}}> (MCP codex_watch is primary)",
+    watch: "watch --input-file <JSON {threadId,projectPath or projectId,expectedCwd?,supervisor:{host,threadId or sessionId,mode,cwd,executable}}> (MCP codex_watch is primary)",
     watches: "watches", events: "events --input-file <JSON {subscriptionId,includeAcknowledged?}>",
     "event-context": "event-context --input-file <JSON {eventId,previewChars?}> (one compact event and current-state read)",
     "event-report": "event-report --input-file <JSON {eventId,section?,offset?,limit?,reportHash?}> (read full report only when needed)",
@@ -48,7 +48,7 @@ export const help = {
     "Installation configures the desktop bridge, primary MCP tools, and a persistent watcher with login recovery.",
     "Never retry start/reply after an uncertain transport failure without checking status/threads first.",
     "Use resolve when start returns pendingClientThreadId; do not pass a pending ID to status or wait.",
-    "Answers require human input or explicit authorization. Command approvals stay in Codex.",
+    "Resolve routine answers within the agreed task scope; request new scope in the supervising chat. Host command approvals stay in Codex.",
   ],
 };
 
@@ -79,7 +79,11 @@ export function parseToolArguments(command, argv) {
     positional.push(flag);
   }
   if (input) for (const [key, value] of Object.entries(input)) set(key, value);
-  if (["status", "wait", "reply", "resolve"].includes(command)) {
+  if (command === "reply") {
+    if (positional.length > 1) throw new Error("reply accepts at most one threadId");
+    if (positional.length) set("threadId", positional[0]);
+    if (!args.threadId && !args.subscriptionId && !args.eventId) throw new Error("reply requires threadId, subscriptionId, or eventId");
+  } else if (["status", "wait", "resolve"].includes(command)) {
     if (positional.length !== 1) throw new Error(`${command} requires exactly one ${command === "resolve" ? "pendingClientThreadId" : "threadId"}`);
     set(command === "resolve" ? "clientThreadId" : "threadId", positional[0]);
   } else if (positional.length) throw new Error(`Unexpected argument ${positional[0]}`);
@@ -95,17 +99,17 @@ export async function main(argv = process.argv.slice(2)) {
     return install([command, ...rest]);
   }
   if (command === "service") return (await import("./daemon.mjs")).main(rest);
-  if (command === "host") return { ...(await import("./supervision.mjs")).hostIdentity(), codexThreadId: process.env.CODEX_THREAD_ID ?? null,
+  if (command === "host") return { ...(await import("./src/tasks/supervision.mjs")).hostIdentity(), codexThreadId: process.env.CODEX_THREAD_ID ?? null,
     claudeSessionId: process.env.CLAUDE_CODE_SESSION_ID ?? null, cwd: process.cwd(), runtime: process.execPath,
     next: "Use the actual supervisor identifier; Claude session ID is available in its Bash/PowerShell subprocess environment." };
   if (command === "info") {
     if (rest.some((item) => item !== "--json")) throw new Error("info takes no arguments");
-    return (await import("./transport.mjs")).relay("relay/info", undefined, { timeoutMs: 3_000 });
+    return (await import("./src/desktop/transport.mjs")).relay("relay/info", undefined, { timeoutMs: 3_000 });
   }
   const tool = commands[command];
   if (!tool) throw new Error(`Unknown command ${command}. Run help for exact syntax.`);
   const args = parseToolArguments(command, rest);
-  return (await import("./tools.mjs")).runTool(tool, args);
+  return (await import("./src/tasks/tools.mjs")).runTool(tool, args);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

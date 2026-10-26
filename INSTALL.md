@@ -52,6 +52,8 @@ The normal install starts a hidden watcher supervisor immediately and registers 
 
 Existing unrelated settings are preserved. If an existing entry, Skill, or startup file is not owned by this installation, or managed content was edited, report the conflict rather than overwriting it. The installed Skill contains actual runtime/CLI/installer paths, so later agents need no PATH setup.
 
+Public executable entry points remain at the release root. Their internal modules are packaged under `src/tasks/`, `src/desktop/`, `src/watch/`, and `src/runtime/`. The installer checks the required entry points and modules before switching integrations; copy the complete source tree rather than only its root `.mjs` files.
+
 ## 4. Verify installation and activate MCP
 
 Using `runtime` and `release` returned by installation, run:

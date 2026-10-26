@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readTaskReport } from "../task-report.mjs";
+import { readTaskReport } from "../src/tasks/task-report.mjs";
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "relay-report-"));

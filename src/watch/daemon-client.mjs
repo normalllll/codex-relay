@@ -4,7 +4,7 @@ import net from "node:net";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { relayHome, unixSocket } from "./paths.mjs";
+import { relayHome, unixSocket } from "../runtime/paths.mjs";
 
 const identity = crypto.createHash("sha256").update(relayHome.toLowerCase()).digest("hex").slice(0, 20);
 // Unix sockets stay in the private relay home rather than a shared temporary directory.
@@ -63,7 +63,7 @@ export async function startService({ resume = false } = {}) {
   daemonToken(true);
   const log = fs.openSync(path.join(relayHome, "watch-service.log"), "a");
   try {
-    const child = spawn(process.execPath, [fileURLToPath(new URL("./daemon.mjs", import.meta.url)), "supervise"], {
+    const child = spawn(process.execPath, [fileURLToPath(new URL("../../daemon.mjs", import.meta.url)), "supervise"], {
       env: { ...process.env, CODEX_RELAY_HOME: relayHome }, detached: true, windowsHide: true, stdio: ["ignore", log, log],
     });
     let failed;

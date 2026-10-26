@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { callApp, scanRolloutBackward } from "./codex-client.mjs";
-import { openReadOnlyDatabase } from "./sqlite.mjs";
+import { callApp, scanRolloutBackward } from "../desktop/codex-client.mjs";
+import { openReadOnlyDatabase } from "../runtime/sqlite.mjs";
 
 const SCAN_LIMIT = 64 * 1024 * 1024;
 const validThread = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,300}$/.test(value);

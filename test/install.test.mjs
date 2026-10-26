@@ -52,11 +52,15 @@ function fixture(t, platform = "win32", prefix = "codex-relay-install-") {
     "mcp.mjs": "// fixture MCP\n",
     "daemon.mjs": 'console.log(JSON.stringify({ok:true,running:false}));\n',
     "service.mjs": "// fixture stable watcher launcher\n",
-    "supervision.mjs": "// fixture supervision workflow\n",
-    "model-policy.mjs": "// fixture session policy inspection\n",
-    "event-context.mjs": "// fixture combined event reader\n",
-    "task-report.mjs": "// fixture original turn report reader\n",
-    "paths.mjs": "export const value = 42;\n",
+    "claude-mcp.mjs": "// fixture Claude MCP entry\n",
+    "relay-cli.mjs": "// fixture bridge CLI entry\n",
+    "codex-wait.mjs": "// fixture background wait entry\n",
+    ...Object.fromEntries(["tools", "supervision", "event-context", "task-report", "task-target", "project-discovery", "model-policy", "outbox"].map((name) => [`src/tasks/${name}.mjs`, `// fixture ${name}\n`])),
+    ...Object.fromEntries(["codex-client", "codex-ipc", "transport"].map((name) => [`src/desktop/${name}.mjs`, `// fixture ${name}\n`])),
+    ...Object.fromEntries(["daemon-client", "watch-engine", "watch-store", "host-wake"].map((name) => [`src/watch/${name}.mjs`, `// fixture ${name}\n`])),
+    "src/runtime/paths.mjs": "export const value = 42;\n",
+    "src/runtime/sqlite.mjs": "// fixture SQLite runtime\n",
+    "src/runtime/process-state.mjs": "// fixture process state\n",
     "README.md": "Fixture source\n",
     "skills/codex-relay/SKILL.md": "---\nname: codex-relay\ndescription: Fixture skill\n---\nUse {{RUNTIME}} {{CLI_PATH}}; manage {{INSTALL_PATH}}.\n",
     "skills/codex-relay/references/troubleshooting.md": "Read the diagnostics.\n",
@@ -66,6 +70,54 @@ function fixture(t, platform = "win32", prefix = "codex-relay-install-") {
   const run = (...args) => main([...args, "--home", home, "--platform", platform]);
   return { dir, source, home, relay, run, state: () => readJson(path.join(relay, "install.json")) };
 }
+
+test("incomplete source trees fail before changing installation integrations", async (t) => {
+  const f = fixture(t);
+  fs.unlinkSync(path.join(f.source, "src", "desktop", "codex-ipc.mjs"));
+  await assert.rejects(f.run("install", "--source", f.source), /Source is missing src\/desktop\/codex-ipc\.mjs/);
+  assert.equal(fs.existsSync(path.join(f.home, ".codex", "config.toml")), false);
+  assert.equal(fs.existsSync(path.join(f.relay, "install.json")), false);
+});
+
+test("actual source snapshot runs root CLI, offline doctor, and MCP discovery from an isolated installation", async (t) => {
+  const f = fixture(t);
+  const checkout = fileURLToPath(new URL("../", import.meta.url));
+  const installed = await f.run("install", "--source", checkout, "--target", "both");
+  assert.equal(installed.serviceStatus.skipped, true);
+  const state = f.state();
+  const env = {
+    ...process.env, CODEX_HOME: path.join(f.home, ".codex"), CODEX_RELAY_HOME: f.relay,
+    CODEX_RELAY_CHANNEL_SESSION_ID: "", CODEX_RELAY_WAKE_EVENT_ID: "",
+    CODEX_APP_TOOLS_PIPE_PATH: "", CODEX_APP_TOOLS_CALLER_HOST_ID: "",
+  };
+  const runEntry = (entry, args = [], input) => {
+    const result = spawnSync(state.runtime, [path.join(state.release, entry), ...args], {
+      cwd: f.home, env, input, encoding: "utf8", windowsHide: true, timeout: 15_000,
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);
+    return result.stdout.trim();
+  };
+  const help = JSON.parse(runEntry("cli.mjs", ["help"]));
+  assert.equal(help.name, "codex-relay");
+  assert.ok(help.commands.supervise);
+  const doctor = JSON.parse(runEntry("cli.mjs", ["doctor", "--offline", "--home", f.home, "--platform", "win32"]));
+  assert.equal(doctor.ok, true);
+  assert.equal(doctor.status, "configured");
+  assert.equal(doctor.bridge.skipped, true);
+  assert.equal(doctor.service.skipped, true);
+  assert.equal(doctor.release, state.release);
+  const requests = [
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+  ];
+  const responses = runEntry("mcp.mjs", [], requests.map(JSON.stringify).join("\n") + "\n")
+    .split("\n").map((line) => JSON.parse(line));
+  assert.equal(responses.find((response) => response.id === 1).result.serverInfo.name, "codex-relay");
+  const tools = responses.find((response) => response.id === 2).result.tools.map((tool) => tool.name);
+  for (const name of ["codex_supervise", "codex_reply", "codex_event_context", "codex_watch_ack"]) assert.ok(tools.includes(name));
+  assert.equal(fs.existsSync(path.join(state.release, "tools.mjs")), false);
+  assert.equal(fs.existsSync(path.join(state.release, "src", "tasks", "tools.mjs")), true);
+});
 
 test("installs both skills and default MCP, preserves unrelated settings, and uninstalls cleanly", async (t) => {
   const f = fixture(t);
@@ -81,7 +133,7 @@ test("installs both skills and default MCP, preserves unrelated settings, and un
   assert.deepEqual(result.mcpTargets, ["codex", "claude"]);
   assert.equal(result.serviceStatus.skipped, true);
   const state = f.state();
-  assert.equal(fs.readFileSync(path.join(state.release, "paths.mjs"), "utf8"), "export const value = 42;\n");
+  assert.equal(fs.readFileSync(path.join(state.release, "src", "runtime", "paths.mjs"), "utf8"), "export const value = 42;\n");
   for (const skill of state.skills) {
     const content = fs.readFileSync(path.join(skill.path, "SKILL.md"), "utf8");
     assert.ok(content.includes(state.runtime));

@@ -9,7 +9,7 @@ For a request to create or select a Codex execution chat and follow it to a fini
 For development:
 - Keep source, comments, CLI messages, skills, and documentation in English. Chinese is allowed only in files ending in `_zh.md`.
 - Keep Node and Bun execution working without dependencies or transpilation.
-- CLI and MCP share `tools.mjs`; fix behavior there rather than creating separate implementations.
+- CLI and MCP share `src/tasks/tools.mjs`; fix behavior there rather than creating separate implementations.
 - Use `node --test test/*.test.mjs` and `bun test` for isolated validation. Tests must use temporary homes/pipes; never modify real user configuration, launch/focus Codex, or create live tasks.
 - The desktop adapter uses internal Codex interfaces. Windows is the only platform tested with a live desktop; macOS and Linux paths are implemented and covered by isolated tests only. Do not claim live support on them without a live verification. Preserve honest diagnostic states when the host requires reload or is incompatible.
 - Do not publish, push, install on the real account, or restart desktop applications as part of repository development.

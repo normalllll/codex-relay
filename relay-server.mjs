@@ -6,7 +6,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { relayHome, controlPipe, tokenFile, clearStaleSocket, restrictSocket } from "./paths.mjs";
+import { relayHome, controlPipe, tokenFile, clearStaleSocket, restrictSocket } from "./src/runtime/paths.mjs";
 
 const STATE_DIR = relayHome;
 const TOKEN_FILE = tokenFile;

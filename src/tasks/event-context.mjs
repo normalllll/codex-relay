@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
-import { WatchStore } from "./watch-store.mjs";
-import { status } from "./codex-client.mjs";
+import { WatchStore } from "../watch/watch-store.mjs";
+import { status } from "../desktop/codex-client.mjs";
 import { readTaskReport } from "./task-report.mjs";
 
 const shorten = (value, limit) => {
@@ -45,6 +45,7 @@ export function createEventReader({ store = new WatchStore(), readStatus = statu
     if (event.phase === "acknowledged") return { event: metadata, handled: true, action: event.action, nextAction: "skip" };
     const result = { event: metadata, handled: false, dataTrust: "taskData", subscriptionEnabled: subscription?.enabled ?? false,
       report: { tool: "codex_event_report", eventId }, nextAction: event.phase === "uncertain" ? "reconcile" : "handle" };
+    if (subscription?.target) result.target = subscription.target;
     if (!result.subscriptionEnabled) return { ...result, nextAction: "skip" };
     if (subscription?.goal) {
       result.goal = { task: bounded(subscription.goal.task, 1000), doneWhen: bounded(subscription.goal.doneWhen, 2000) };

@@ -4,7 +4,7 @@
 // usage: node codex-wait.mjs <threadId> [timeoutMinutes=60] [--past-attention]
 // --past-attention: the thread's current attention flags (for example an approval waiting for the
 // user in Codex) were already reported; keep waiting until they change instead of exiting at once.
-import { wait } from "./codex-client.mjs";
+import { wait } from "./src/desktop/codex-client.mjs";
 
 const args = process.argv.slice(2);
 const pastAttention = args.includes("--past-attention");

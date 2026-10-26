@@ -4,21 +4,25 @@
 // ask Codex to summarize with codex_reply when needed.
 import {
   callApp,
+  MAX_RECENT_THREADS,
   markAnswered,
   clip,
   pendingQuestions,
   questionReply,
   resolveProject,
+  resolveProjectDetails,
   status,
   wait,
-} from "./codex-client.mjs";
-import { steerThread } from "./codex-ipc.mjs";
+} from "../desktop/codex-client.mjs";
+import { steerThread, submitThread } from "../desktop/codex-ipc.mjs";
 import crypto from "node:crypto";
+import path from "node:path";
 import { ReplyOutbox } from "./outbox.mjs";
-import { daemonRequest, startService } from "./daemon-client.mjs";
-import { WatchStore } from "./watch-store.mjs";
+import { daemonRequest, startService } from "../watch/daemon-client.mjs";
+import { WatchStore, canonical } from "../watch/watch-store.mjs";
 import { createSupervision, hostIdentity } from "./supervision.mjs";
 import { createEventReader } from "./event-context.mjs";
+import { resolveTarget, assertTarget, samePath, validateTarget } from "./task-target.mjs";
 
 // Pairs answers with pending questions by {callId, index}. Answers are only ever taken from
 // `answers`: a plain `message` is an instruction and is never used as an answer, so an
@@ -34,8 +38,9 @@ function answerPairs(questions, answers) {
 const listQuestions = (questions) =>
   questions.map(({ callId, index, question }) => ({ callId, index, question: clip(question, 300) }));
 
-async function sendInstruction(threadId, message) {
-  await callApp("send_message_to_thread", { threadId, hostId: "local", prompt: `[Delegated instruction via Codex Relay]\n${message}` });
+function deliveryMessageId(requestId, stage) {
+  const digest = crypto.createHash("sha256").update(`${requestId}:${stage}`).digest("hex");
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
 
 
@@ -44,10 +49,11 @@ const threadIdSchema = { type: "string", description: "threadId returned by code
 
 export const tools = {
   codex_projects: {
-    description: "List Codex app projects as {projectId, label, path}.",
-    inputSchema: { type: "object", properties: {} },
-    run: async () =>
-      (await callApp("list_projects", {})).projects.map(({ projectId, label, path: projectPath }) => ({
+    description: "List Codex app projects as {projectId, label, path}. Supply projectPath or projectId to verify a recipient project, including catalogue omissions confirmed from existing local chats. This is not an editable-path allowlist. A bridge connection error needs doctor, not project registration.",
+    inputSchema: { type: "object", properties: { projectPath: { type: "string" }, projectId: { type: "string" } } },
+    run: async (args = {}) =>
+      (args.projectPath || args.projectId ? [await resolveProjectDetails(args)] : (await callApp("list_projects", {})).projects)
+        .map(({ projectId, label, path: projectPath }) => ({
         projectId,
         label,
         path: projectPath,
@@ -59,7 +65,7 @@ export const tools = {
       type: "object",
       properties: {
         projectPath: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: 50 },
+        limit: { type: "integer", minimum: 1, maximum: MAX_RECENT_THREADS },
       },
     },
     run: async (args) => {
@@ -73,7 +79,7 @@ export const tools = {
   codex_start: {
     description:
       "Start a task in the user's Codex desktop app (visible there, run with the user's own permission " +
-      "settings, so approvals are asked of the user in Codex). Returns threadId. Follow with codex_wait.",
+      "settings, so approvals are asked of the user in Codex). Returns the verified target, or needsAttention with the exact created threadId if verification fails. Never create a replacement after that failure. Follow with codex_wait.",
     inputSchema: {
       type: "object",
       properties: {
@@ -86,16 +92,39 @@ export const tools = {
       required: ["prompt"],
     },
     run: async (args) => {
+      const project = await resolveProjectDetails(args);
+      const projectId = project.projectId;
       const created = await callApp("create_thread", {
+        // The desktop tool requires a nonempty initial task and adds its own source envelope.
         prompt: args.prompt,
         ...(args.title ? { title: args.title } : {}),
         target: {
           type: "project",
-          projectId: await resolveProject(args),
+          projectId,
           environment: { type: args.worktree ? "worktree" : "local" },
         },
       });
-      return { threadId: created.threadId ?? null, pendingClientThreadId: created.clientThreadId,
+      let target;
+      if (created.threadId) {
+        try {
+          target = await resolveTarget(created.threadId, { verifiedProject: project, createdThreadId: created.threadId,
+            expected: { projectId, projectPath: project.path } });
+          if (!args.worktree && !samePath(target.cwd, target.projectPath)) throw new Error("The created chat working directory differs from the selected project");
+        } catch (error) {
+          return { ok: false, status: "needsAttention", threadId: created.threadId, projectId,
+            error: error.message, nextAction: "Inspect this exact created chat; do not create a replacement after verification failed." };
+        }
+      }
+      if (!created.threadId && created.clientThreadId) {
+        try {
+          await new ReplyOutbox().execute(`start-pending:${created.clientThreadId}`, { projectId, projectPath: project.path }, async () =>
+            ({ pendingClientThreadId: created.clientThreadId, projectId, projectPath: project.path }));
+        } catch (error) {
+          return { ok: false, status: "needsAttention", pendingClientThreadId: created.clientThreadId, projectId,
+            error: error.message, nextAction: "Preserve this pending creation ID and resolve it with the intended project; do not create a replacement." };
+        }
+      }
+      return { threadId: created.threadId ?? null, target, pendingClientThreadId: created.clientThreadId,
         status: created.threadId ? "started" : "pending", nextAction: created.threadId ? "wait" : "resolve" };
     },
   },
@@ -134,21 +163,32 @@ export const tools = {
       "Send to a Codex thread: answer its pending question(s) with `answers`, and/or give a follow-up " +
       "instruction with `message` (or ask it to summarize its work instead of reading the transcript). " +
       "Answers are only taken from `answers` as [{callId, index, text}] (from codex_status/codex_wait; " +
-      "may answer a subset). `message` is always delivered as an instruction (a delegated message, not as " +
-      "the user), never as an answer, even when a question is pending; the result then lists the " +
+      "may answer a subset). Messages and answers are delivered verbatim through ordinary desktop input. " +
+      "Include only work instructions, concrete decisions, necessary scope and acceptance criteria. " +
+      "Compose direct instructions or answers before sending; do not forward surrounding conversation. " +
+      "Omit narration about who spoke, sent, approved or relayed the text, its source chat, and supervision or approval workflows, regardless of wording or language. " +
+      "Preserve exact quotations only when needed as task data. Do not claim to be the human or expand the established scope. " +
+      "Keep orchestration and authorization records with the sender. " +
+      "Project selectors identify the recipient, not its editable-path scope. Preserve task-authorized external paths in work text; do not require attaching them as projects or changing the bound executor. Host permission requests and denials still apply. " +
+      "`message` is an instruction, never an answer, even when a question is pending; the result lists the " +
       "questions still unanswered. Passing both answers the questions first, then sends the instruction.",
     inputSchema: {
       type: "object",
       properties: {
         threadId: threadIdSchema,
-        message: { type: "string", description: "A follow-up instruction. Never used as an answer." },
-        userProvided: { type: "boolean", description: "Required true when answers were supplied or explicitly authorized by the human. Never invent user authorization or approve commands." },
-        answerSource: { type: "string", description: "Use agent for routine decisions within delegated scope; use user with userProvided:true for actual human answers. Agent provenance is included in the delivered text." },
+        subscriptionId: { type: "string", description: "Existing supervised task. Resolves its bound recipient; prefer this for ordinary follow-up. An older unbound subscription requires an explicit intended project to verify and attach its target." },
+        eventId: { type: "string", description: "Current unhandled watch event. Resolves its bound recipient; prefer this when handling a wake. An older unbound subscription requires an explicit intended project." },
+        projectPath: { type: "string", description: "Expected recipient project, not the paths to edit; required for standalone threadId sends or older unbound subscriptions unless projectId is supplied. Does not invent missing worktree project membership." },
+        projectId: { type: "string", description: "Alternative expected existing project." },
+        expectedCwd: { type: "string", description: "Optional assertion of the recipient's actual working directory." },
+        message: { type: "string", description: "A direct follow-up work instruction without source, sender, approval or supervision narration. Never used as an answer." },
+        userProvided: { type: "boolean", description: "Optional receipt metadata indicating that the answer text came from the human." },
+        answerSource: { type: "string", description: "Optional receipt metadata: agent (default) or user. Does not alter delivered text or grant permissions." },
         requestId: { type: "string", description: "Stable idempotency key. Reuse the same ID and identical input when retrying; uncertain deliveries are not resent." },
         allowOpen: { type: "boolean", description: "Allow opening/focusing the Codex thread if needed. Default false; use only with user permission for desktop interference." },
         answers: {
           type: "array",
-          description: "Answers to pending questions, each keyed by the question's callId and index.",
+          description: "Direct answers to pending questions without source, sender, approval or supervision narration, each keyed by the question's callId and index.",
           items: {
             type: "object",
             properties: { callId: { type: "string" }, index: { type: "integer" }, text: { type: "string" } },
@@ -156,7 +196,6 @@ export const tools = {
           },
         },
       },
-      required: ["threadId"],
     },
     run: sendReply,
   },
@@ -174,63 +213,149 @@ async function answerQuestions(threadId, pending, pairs, allowOpen, source, mess
   }));
 
   // Only the card-aware IPC path closes question cards. Ordinary delegated messages cannot.
-    const { opened } = await steerThread(threadId, reply, pending.cwd, { allowOpen, messageId });
-    markAnswered(answeredIds);
-    return {
-      sent: true,
-      via: "codex-ipc",
-      answerSource: source,
-      answered: echo,
-      stillPending: pending.questions.length - pairs.length || undefined,
-      openedThread: opened || undefined,
-    };
+  const { opened } = await steerThread(threadId, reply, pending.cwd, { allowOpen, messageId });
+  markAnswered(answeredIds);
+  return {
+    sent: true,
+    via: "codex-ipc",
+    answerSource: source,
+    answered: echo,
+    stillPending: pending.questions.length - pairs.length || undefined,
+    openedThread: opened || undefined,
+  };
 }
 
 async function sendReply(args) {
   const answers = args.answers ?? [];
   if (!answers.length && !args.message) throw new Error("Pass answers, message, or both");
-  const source = args.answerSource ?? (args.userProvided === true ? "user" : null);
+  const source = args.answerSource ?? (args.userProvided === true ? "user" : "agent");
   if (source && !["agent", "user"].includes(source)) throw new Error("answerSource must be agent or user");
   if (source === "agent" && args.userProvided) throw new Error("Agent answers cannot be marked userProvided");
-  if (answers.length && source !== "agent" && !(source === "user" && args.userProvided === true))
-    throw new Error("Answers require answerSource:agent for delegated decisions, or userProvided:true for human answers");
   const requestId = args.requestId ?? crypto.randomUUID();
   const input = { ...args }; delete input.requestId;
   return new ReplyOutbox().execute(requestId, input, async (transaction) => {
+    const deliveredAnswers = transaction.delivered("answers");
+    const deliveredInstruction = transaction.delivered("instruction");
+    if ((!answers.length || deliveredAnswers) && (!args.message || deliveredInstruction)) {
+      // A crash after the last write must not turn acknowledgment, removal, or
+      // desktop unavailability into a reason to repeat an already delivered action.
+      const savedTarget = transaction.delivered("target")?.result ?? deliveredAnswers?.result.target ?? deliveredInstruction?.result.target;
+      return replyResult(args, { subscriptionId: args.subscriptionId, eventId: args.eventId ?? process.env.CODEX_RELAY_WAKE_EVENT_ID },
+        savedTarget, deliveredAnswers?.result, null, true, deliveredInstruction?.result);
+    }
+    const binding = replyBinding(args, transaction.legacyReplyThreadId);
+    let observed;
+    const target = await transaction.stage("target", async () => {
+      try { return observed = await resolveTarget(binding.threadId, { expected: binding.expected }); }
+      catch (error) { throw Object.assign(error, { delivery: "notSent" }); }
+    }, { replaySafe: true });
+    assertTarget(binding.expected, target);
+    // A retry revalidates the saved recipient rather than resolving a new destination.
+    observed ??= await resolveTarget(target.threadId, { expected: target });
+    if (binding.needsBinding) new WatchStore().bindTarget(binding.subscriptionId, observed);
+    const threadId = target.threadId;
     let answered;
     if (answers.length) answered = await transaction.stage("answers", async () => {
       let pending;
-      try { pending = await pendingQuestions(args.threadId); }
+      try { pending = await pendingQuestions(threadId); }
       catch (error) { throw Object.assign(error, { delivery: "notSent" }); }
       if (!pending) throw Object.assign(new Error("Codex has no pending questions in its current turn; send text as message"), { delivery: "notSent" });
+      if (!samePath(pending.cwd, target.cwd)) throw Object.assign(new Error("The pending question working directory changed; inspect the recipient"), { delivery: "notSent" });
       let pairs;
       try { pairs = answerPairs(pending.questions, answers); }
       catch (error) { throw Object.assign(error, { delivery: "notSent" }); }
-      if (source === "agent") pairs = pairs.map(({ entry, answer }) => ({ entry, answer: `[Delegated agent answer within the authorized task]\n${answer}` }));
-      const digest = crypto.createHash("sha256").update(`${requestId}:answers`).digest("hex");
-      const messageId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
-      return answerQuestions(args.threadId, pending, pairs, args.allowOpen === true, source, messageId);
+      const messageId = deliveryMessageId(requestId, "answers");
+      return { ...await answerQuestions(threadId, pending, pairs, args.allowOpen === true, source, messageId), target: observed };
     });
-    if (args.message) await transaction.stage("instruction", async () => {
-      await sendInstruction(args.threadId, args.message); return { sent: true };
-    });
+    let instruction = deliveredInstruction?.result;
+    if (args.message) instruction = await transaction.stage("instruction", async () => ({ sent: true, target: observed,
+      ...await submitThread(threadId, args.message, observed.cwd, { allowOpen: args.allowOpen === true,
+        messageId: deliveryMessageId(requestId, "instruction") }) }));
     let pending;
     // Once a write succeeds, an optional status read must not make the write look failed.
-    try { pending = await pendingQuestions(args.threadId); } catch {}
-    return { ...(answered ?? { sent: true, via: "send_message_to_thread" }),
-      instructionSent: args.message ? true : undefined, unansweredQuestions: pending ? listQuestions(pending.questions) : undefined };
+    try { pending = await pendingQuestions(threadId); } catch {}
+    return replyResult(args, binding, observed, answered, pending, false, instruction);
   });
+}
+
+function replyResult(args, binding, target, answered, pending, recovered = false, instruction) {
+  return { ...(answered ?? { sent: true, via: "codex-ipc" }),
+    ...(instruction?.method ? { instructionMethod: instruction.method } : {}),
+    threadId: target?.threadId ?? args.threadId, ...(target ? { target } : {}),
+    ...(binding.subscriptionId ? { subscriptionId: binding.subscriptionId } : {}),
+    ...(binding.eventId ? { eventId: binding.eventId } : {}), ...(recovered ? { recovered: true } : {}),
+    instructionSent: args.message ? true : undefined, unansweredQuestions: pending ? listQuestions(pending.questions) : undefined };
+}
+
+function replyBinding(args, legacyReplyThreadId) {
+  if (args.projectId && args.projectPath) throw new Error("Pass projectPath or projectId, not both");
+  for (const field of ["projectPath", "expectedCwd"])
+    if (args[field] && !path.isAbsolute(args[field])) throw new Error(`${field} must be absolute`);
+  let subscription;
+  const store = new WatchStore();
+  const eventId = args.eventId ?? process.env.CODEX_RELAY_WAKE_EVENT_ID;
+  if (eventId) {
+    const context = store.eventContext(eventId);
+    if (context.event.phase === "acknowledged") throw new Error("The watch event is already handled; inspect context before replying");
+    subscription = context.subscription;
+    if (args.subscriptionId && args.subscriptionId !== context.event.subscriptionId) throw new Error("eventId and subscriptionId select different tasks");
+    if (!subscription || context.event.threadId !== subscription.threadId) throw new Error("The watch event target binding is unavailable");
+  } else if (args.subscriptionId) subscription = store.get(args.subscriptionId);
+  else if (legacyReplyThreadId) {
+    const candidates = store.list().filter((item) => item.enabled && item.threadId === legacyReplyThreadId && item.target);
+    if (candidates.length) {
+      const original = candidates[0].target;
+      for (const candidate of candidates) { validateTarget(candidate.target); assertTarget(original, candidate.target); }
+      subscription = candidates[0];
+    } else throw new Error("The incomplete legacy reply needs its original subscription's verified target binding before retrying with identical input");
+  }
+  if (eventId || args.subscriptionId || subscription) {
+    if (!subscription?.enabled) throw new Error("The selected watch subscription is inactive or missing");
+    if (args.threadId && args.threadId !== subscription.threadId) throw new Error("threadId does not match the supervised task");
+    if (!subscription.target) {
+      if (!args.projectId && !args.projectPath) throw new Error("The subscription has no verified target binding; supply its explicit project in this reply or re-register it with codex_watch");
+      return { threadId: subscription.threadId, subscriptionId: subscription.id, ...(eventId ? { eventId } : {}), needsBinding: true,
+        expected: { threadId: subscription.threadId, hostId: "local", projectId: args.projectId, projectPath: args.projectPath, cwd: args.expectedCwd } };
+    }
+    validateTarget(subscription.target);
+    if (subscription.target.threadId !== subscription.threadId || (args.threadId && args.threadId !== subscription.threadId))
+      throw new Error("threadId does not match the supervised task");
+    assertTarget({ projectId: args.projectId, projectPath: args.projectPath, cwd: args.expectedCwd }, subscription.target);
+    return { threadId: subscription.threadId, subscriptionId: subscription.id, ...(eventId ? { eventId } : {}), expected: subscription.target };
+  }
+  if (!args.threadId) throw new Error("Select a recipient with eventId, subscriptionId, or threadId");
+  if (!args.projectId && !args.projectPath) throw new Error("Standalone threadId replies require an expected projectPath or projectId; use subscriptionId or eventId for supervised follow-up");
+  return { threadId: args.threadId, expected: { threadId: args.threadId, hostId: "local",
+    projectId: args.projectId, projectPath: args.projectPath, cwd: args.expectedCwd } };
 }
 
 tools.codex_resolve = {
   description: "Resolve a queued worktree creation's pendingClientThreadId to a real threadId. Retry after a short wait when still pending.",
-  inputSchema: { type: "object", properties: { clientThreadId: { type: "string" } }, required: ["clientThreadId"] },
-  run: async ({ clientThreadId }) => {
-    const listed = await callApp("list_threads", { limit: 100 });
-    const thread = [...(listed.pinnedThreads ?? []), ...(listed.threads ?? [])]
-      .find((item) => item.kind === "codex" && (item.clientThreadId === clientThreadId || item.id === clientThreadId));
-    return thread ? { status: "started", threadId: thread.id, nextAction: "wait" }
-      : { status: "pending", pendingClientThreadId: clientThreadId, nextAction: "Retry resolve after a short wait; inspect Codex if setup remains pending." };
+  inputSchema: { type: "object", properties: { clientThreadId: { type: "string" }, projectPath: { type: "string" }, projectId: { type: "string" }, expectedCwd: { type: "string" } }, required: ["clientThreadId"] },
+  run: async ({ clientThreadId, projectId, projectPath, expectedCwd }) => {
+    if (projectId && projectPath) throw new Error("Pass projectPath or projectId, not both");
+    if ((projectPath && !path.isAbsolute(projectPath)) || (expectedCwd && !path.isAbsolute(expectedCwd))) throw new Error("projectPath and expectedCwd must be absolute");
+    const outbox = new ReplyOutbox();
+    const saved = outbox.inspect(`start-pending:${clientThreadId}`).result;
+    const resolved = outbox.inspect(`resolve-pending:${clientThreadId}`).result?.target;
+    if (!saved && !resolved && !projectId && !projectPath) throw new Error("Pending creation has no saved project binding; inspect the original creation and pass its explicit projectPath or projectId");
+    const expectation = { projectId, projectPath, cwd: expectedCwd };
+    if (saved) assertTarget({ projectId, projectPath }, saved);
+    const listed = resolved ? null : await callApp("list_threads", { limit: MAX_RECENT_THREADS });
+    const matches = listed ? [...(listed.pinnedThreads ?? []), ...(listed.threads ?? [])]
+      .filter((item) => item.kind === "codex" && (!item.hostId || item.hostId === "local") && item.clientThreadId === clientThreadId) : [];
+    const ids = [...new Set(matches.map((item) => item.id))];
+    if (ids.length > 1) throw new Error("Pending creation resolved to multiple chats; inspect the exact creation before continuing");
+    const threadId = resolved?.threadId ?? ids[0];
+    if (threadId) {
+      const target = await resolveTarget(threadId, { verifiedProject: saved ? { projectId: saved.projectId, path: saved.projectPath } : undefined,
+        createdThreadId: saved ? threadId : undefined,
+        expected: resolved ?? { ...expectation, ...saved } });
+      assertTarget(expectation, target);
+      await outbox.execute(`resolve-pending:${clientThreadId}`, saved ?? { projectId: target.projectId, projectPath: target.projectPath }, async () => ({ target }));
+      return { status: "started", threadId, target, nextAction: "wait" };
+    }
+    return { status: "pending", pendingClientThreadId: clientThreadId, nextAction: "Retry resolve after a short wait; inspect Codex if setup remains pending." };
   },
 };
 
@@ -249,7 +374,9 @@ const automaticSupervisorSchema = { ...supervisorSchema, properties: { ...superv
 const preparationProperties = {
   createNew: { type: "boolean", description: "True only when the user requested a new execution chat. The current chat remains supervisor." },
   threadId: threadIdSchema, threadTitle: { type: "string", description: "Exact existing execution chat title; ambiguity is reported." },
-  projectPath: { type: "string" }, projectId: { type: "string" }, supervisor: automaticSupervisorSchema,
+  projectPath: { type: "string", description: "Explicit recipient project placement. When omitted, use the verified supervisor project. Do not infer it from a library mentioned only as an edit target." },
+  projectId: { type: "string", description: "Explicit recipient project ID, alternative to projectPath." },
+  expectedCwd: { type: "string", description: "Assert a user-required execution working directory, which may differ from its project for a worktree. An external edit target alone is not this assertion." }, supervisor: automaticSupervisorSchema,
 };
 tools.codex_host = {
   description: "Read actual current host/session identity. If MCP lacks it, run installed CLI host in the current agent shell; never guess a recent chat or ask the user for tool names.",
@@ -270,7 +397,11 @@ tools.codex_supervise = {
 
 tools.codex_watch = {
   description: "Persistently monitor a Codex task and wake a separate Codex or Claude supervisor on questions, attention, and turn completion. Registers durable events and starts the background service. Use only for authorized automatic follow-up.",
-  inputSchema: { type: "object", properties: { threadId: threadIdSchema, supervisor: supervisorSchema, id: { type: "string" } }, required: ["threadId", "supervisor"] },
+  inputSchema: { type: "object", properties: { threadId: threadIdSchema, supervisor: supervisorSchema, id: { type: "string" },
+    projectPath: { type: "string", description: "Explicit intended project path; required unless projectId is supplied. Catalogue omissions use verified existing chat evidence." },
+    projectId: { type: "string", description: "Explicit intended project ID, alternative to projectPath." },
+    expectedCwd: { type: "string", description: "Optional assertion of actual workspace. A worktree cwd can differ from the project root; an assertion alone does not prove project membership." },
+    enabled: { type: "boolean", description: "Explicitly resume or disable an existing watch. Omitting this preserves its active/inactive state." } }, required: ["threadId", "supervisor"] },
   run: async (args) => {
     const host = args.supervisor;
     if (!["codex", "claude"].includes(host.host)) throw new Error("supervisor.host must be codex or claude");
@@ -281,8 +412,19 @@ tools.codex_watch = {
     if (host.host === "claude" && !["resume", "channel"].includes(host.mode)) throw new Error("Choose Claude supervisor.mode resume or channel explicitly");
     if (host.host === "claude" && host.mode === "resume" && !host.cwd) throw new Error("Claude resume requires the original session cwd");
     if (host.host === "codex" && host.threadId === args.threadId) throw new Error("A watched thread cannot supervise itself");
+    if (!args.projectId && !args.projectPath) throw new Error("Watch registration requires the intended projectPath or projectId");
+    const binding = replyBinding(args);
+    const previous = args.id ? new WatchStore().get(args.id) : null;
+    if (previous && (previous.threadId !== args.threadId || canonical(previous.supervisor) !== canonical(args.supervisor)))
+      throw new Error("Subscription identity is immutable; use a new ID for another target or supervisor");
+    if (previous?.target) {
+      validateTarget(previous.target);
+      assertTarget(binding.expected, previous.target);
+    }
+    const target = await resolveTarget(args.threadId, { expected: previous?.target ?? binding.expected });
     await startService({ resume: true });
-    return daemonRequest("subscribe", args);
+    const { projectPath: _projectPath, projectId: _projectId, expectedCwd: _expectedCwd, ...subscription } = args;
+    return daemonRequest("subscribe", { ...subscription, target });
   },
 };
 tools.codex_watches = {
@@ -347,7 +489,9 @@ function enforceWakeScope(name, args) {
     return { ...args, subscriptionId, includeAcknowledged: true };
   }
   if (["codex_status", "codex_reply"].includes(name)) {
-    if (args.threadId !== threadId) throw new Error("Wake worker can access only its watched task");
+    if ((name === "codex_status" && args.threadId !== threadId) || (args.threadId && args.threadId !== threadId) ||
+      (args.eventId && args.eventId !== eventId) || (args.subscriptionId && args.subscriptionId !== subscriptionId))
+      throw new Error("Wake worker can access only its watched task");
     if (name === "codex_reply" && args.requestId && !args.requestId.startsWith(`${eventId}:`)) throw new Error("Wake reply requestId must be scoped to this event");
     return name === "codex_reply" && !args.requestId ? { ...args, requestId: `${eventId}:reply` } : args;
   }

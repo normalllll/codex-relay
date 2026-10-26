@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import net from "node:net";
-import { controlPipe, tokenFile } from "./paths.mjs";
+import { controlPipe, tokenFile } from "../runtime/paths.mjs";
 
 export function relay(method, params, { timeoutMs = 35_000, signal } = {}) {
   if (signal?.aborted) throw new Error("Relay wait cancelled");

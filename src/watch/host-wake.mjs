@@ -3,10 +3,10 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { relayHome, codexHome } from "./paths.mjs";
-import { isMissingProcess } from "./process-state.mjs";
+import { relayHome, codexHome } from "../runtime/paths.mjs";
+import { isMissingProcess } from "../runtime/process-state.mjs";
 
-const defaultMcpPath = fileURLToPath(new URL("./mcp.mjs", import.meta.url));
+const defaultMcpPath = fileURLToPath(new URL("../../mcp.mjs", import.meta.url));
 const MAX_OUTPUT = 1024 * 1024;
 export const followupTools = ["codex_event_context", "codex_event_report", "codex_events", "codex_status", "codex_reply", "codex_watch_ack", "codex_delivery"];
 
@@ -165,7 +165,7 @@ export function createWakeHost({ callApp, sendChannel, run = runHostProcess, hom
       }
       if (mode !== "desktop") throw wakeError("Codex supervisor mode must be desktop or queue");
       try {
-        const invoke = callApp ?? (await import("./codex-client.mjs")).callApp;
+        const invoke = callApp ?? (await import("../desktop/codex-client.mjs")).callApp;
         await invoke("send_message_to_thread", { threadId, hostId: "local", prompt }, { signal });
         return { delivered: true, via: "codex-desktop", supervisorThreadId: threadId };
       } catch (error) { throw classify(error); }

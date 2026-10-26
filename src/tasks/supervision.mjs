@@ -1,12 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { callApp as defaultCallApp } from "./codex-client.mjs";
-import { relayHome } from "./paths.mjs";
-import { serviceStatus, startService, daemonRequest } from "./daemon-client.mjs";
+import { callApp as defaultCallApp, MAX_RECENT_THREADS } from "../desktop/codex-client.mjs";
+import { relayHome } from "../runtime/paths.mjs";
+import { serviceStatus, startService, daemonRequest } from "../watch/daemon-client.mjs";
 import { ReplyOutbox } from "./outbox.mjs";
-import { runHostProcess } from "./host-wake.mjs";
+import { runHostProcess } from "../watch/host-wake.mjs";
 import { inspectModelPolicy } from "./model-policy.mjs";
+import { resolveTarget, samePath, assertLocalThread } from "./task-target.mjs";
+import { discoverProject } from "./project-discovery.mjs";
 
 export function hostIdentity(env = process.env, cwd = process.cwd()) {
   const claude = env.CLAUDE_CODE_SESSION_ID?.trim();
@@ -53,12 +55,8 @@ export async function probeHost(host, executable, { run = runHostProcess, cwd } 
 }
 
 const key = (value) => crypto.createHash("sha256").update(value).digest("hex").slice(0, 24);
-const taskPrompt = (task, doneWhen) => [
-  "[Delegated execution under Codex Relay supervision]", task,
-  "Completion criteria:", doneWhen,
-  "Use the existing model and reasoning settings in Standard mode. Do not enable Fast, priority, or Ultrafast mode.",
-  "Continue within the authorized task. Report concrete results and verification against the completion criteria. Ask when a decision exceeds that scope.",
-].join("\n\n");
+// The executor needs work text; supervision and authorization policy stay with the sender.
+const taskPrompt = (task, doneWhen) => [task, doneWhen].join("\n\n");
 
 export function createSupervision({ callApp = defaultCallApp, modelPolicy = inspectModelPolicy, identity = hostIdentity,
   discover = discoverExecutable, probe = probeHost, getService = serviceStatus, ensureService = startService,
@@ -80,11 +78,12 @@ export function createSupervision({ callApp = defaultCallApp, modelPolicy = insp
     if (!check("currentHost", ["codex", "claude"].includes(supervisor.host) && Boolean(supervisor.host === "codex" ? supervisor.threadId : supervisor.sessionId),
       "A real supervising session identity is required", "Read CLI host in the current agent shell, then retry with that identity."))
       return { ready: false, checks, blockers, warnings };
-    let projects, threads;
+    let projects, threads, allThreads;
     try {
-      projects = (await callApp("list_projects", {})).projects ?? [];
-      const listed = await callApp("list_threads", { limit: 100 });
-      threads = [...(listed.pinnedThreads ?? []), ...(listed.threads ?? [])].filter((item) => item.kind === "codex");
+      projects = ((await callApp("list_projects", {})).projects ?? []).filter((item) => !item.hostId || item.hostId === "local");
+      const listed = await callApp("list_threads", { limit: MAX_RECENT_THREADS });
+      allThreads = [...(listed.pinnedThreads ?? []), ...(listed.threads ?? [])];
+      threads = allThreads.filter((item) => item.kind === "codex" && (!item.hostId || item.hostId === "local"));
       check("desktopBridge", true, "Read-only project and session discovery succeeded");
     } catch (error) {
       check("desktopBridge", false, error.message, "Run doctor and resolve bridge access or pending configuration reload. Do not send a test message.");
@@ -92,34 +91,71 @@ export function createSupervision({ callApp = defaultCallApp, modelPolicy = insp
     }
     let project;
     if (args.projectPath && !path.isAbsolute(args.projectPath)) check("project", false, "projectPath must be absolute");
+    if (args.expectedCwd && !path.isAbsolute(args.expectedCwd)) check("targetDirectory", false, "expectedCwd must be absolute");
     if (args.projectId && args.projectPath) check("project", false, "Specify projectId or projectPath, not both");
-    else if (args.projectId) project = projects.find((item) => item.projectId === args.projectId);
-    else if (args.projectPath) project = projects.find((item) => item.path && path.resolve(item.path).toLowerCase() === path.resolve(args.projectPath).toLowerCase());
-    else if (supervisor.cwd) project = projects.find((item) => item.path && path.resolve(item.path).toLowerCase() === path.resolve(supervisor.cwd).toLowerCase());
-    let target;
+    else {
+      try {
+        const selector = args.projectId ? { projectId: args.projectId, projectPath: context.expectedProjectPath }
+          : { projectPath: args.projectPath ?? supervisor.cwd };
+        const verifiedThreads = [];
+        const registered = context.verifiedProject || projects.some((item) => selector.projectId ? item.projectId === selector.projectId : samePath(item.path, selector.projectPath));
+        // Recent results are partial. Inspect the exact explicitly selected chat,
+        // or the actual supervisor for implicit selection, before declaring a miss.
+        const evidenceId = args.projectId || args.projectPath ? args.threadId : supervisor.host === "codex" ? supervisor.threadId : null;
+        if (!registered && evidenceId) {
+          const view = await callApp("read_thread", { threadId: evidenceId, hostId: "local", turnLimit: 1, includeOutputs: false, maxOutputCharsPerItem: 0 });
+          const thread = view?.thread;
+          assertLocalThread(evidenceId, thread);
+          if (!args.projectId && !args.projectPath && !samePath(thread.cwd, supervisor.cwd))
+            throw new Error("The supervisor working directory does not match its verified chat");
+          verifiedThreads.push({ ...thread, kind: "codex" });
+        }
+        project = await discoverProject(selector, { callApp, projects, threads: allThreads, verifiedThreads, binding: context.expectedTarget, verifiedProject: context.verifiedProject });
+        check("projectSelection", true, project.discovery ?? "The selected local project is registered");
+      } catch (error) {
+        check("projectSelection", false, error.message,
+          "Specify the intended project and verify its exact existing local chat identity and directory; never substitute another project.");
+      }
+    }
+    if (project && args.createNew && !args.worktree && args.expectedCwd)
+      check("targetDirectory", samePath(args.expectedCwd, project.path), "A local execution must use the selected project working directory");
+    if (project && context.expectedProjectPath)
+      check("projectIdentity", samePath(project.path, context.expectedProjectPath), "The bound project path changed; inspect the original project before retrying");
+    let selected, target;
     if (args.threadId && args.threadTitle) check("target", false, "Specify threadId or threadTitle, not both");
     else if (args.threadTitle) {
-      const matches = threads.filter((item) => item.title === args.threadTitle && (!project || item.projectId === project.projectId));
-      if (check("targetSelection", matches.length === 1, matches.length ? "The exact title is ambiguous" : "No exact matching execution chat was found", "Resolve the exact intended chat; ask only if the user's selection is ambiguous.")) target = matches[0];
-    } else if (args.threadId) target = threads.find((item) => item.id === args.threadId) ?? { id: args.threadId };
-    let targetView;
-    if (target) {
-      if (check("separateExecution", supervisor.host !== "codex" || target.id !== supervisor.threadId, "The current supervisor and execution chat must be different")) {
+      const candidates = threads.filter((item) => item.title === args.threadTitle && (!project || !item.projectId || item.projectId === project.projectId));
+      const matches = [];
+      for (const candidate of candidates) {
+        if (candidate.projectId || !project) { matches.push(candidate); continue; }
         try {
-          targetView = await callApp("read_thread", { threadId: target.id, hostId: "local", turnLimit: 1, includeOutputs: false, maxOutputCharsPerItem: 0 });
-          if (!targetView?.thread || targetView.thread.id !== target.id) throw new Error("The execution chat identity was not confirmed");
-          if (project && ((target.projectId && target.projectId !== project.projectId) ||
-            (!target.projectId && targetView.thread.cwd && project.path && path.resolve(targetView.thread.cwd).toLowerCase() !== path.resolve(project.path).toLowerCase())))
-            throw new Error("The selected execution chat does not belong to the requested project");
+          const view = await callApp("read_thread", { threadId: candidate.id, hostId: "local", turnLimit: 1, includeOutputs: false, maxOutputCharsPerItem: 0 });
+          assertLocalThread(candidate.id, view?.thread);
+          // Excluding a confirmed member of another project needs no inference
+          // about that project's root (which may itself be omitted or a worktree).
+          if (view.thread.projectId && view.thread.projectId !== project.projectId) continue;
+          const identity = await resolveTarget(candidate.id, { callApp, projects, threads: allThreads, verifiedProject: project,
+            expected: { projectId: project.projectId, projectPath: project.path } });
+          if (identity.projectId === project.projectId) matches.push(candidate);
+        } catch (error) {
+          check("targetIdentity", false, error.message, "Inspect the exact same-title candidate; missing project metadata does not select a replacement.");
+        }
+      }
+      if (check("targetSelection", matches.length === 1, matches.length ? "The exact title is ambiguous" : "No exact matching execution chat was found", "Resolve the exact intended chat; ask only if the user's selection is ambiguous.")) selected = matches[0];
+    } else if (args.threadId) selected = threads.find((item) => item.id === args.threadId) ?? { id: args.threadId };
+    if (selected) {
+      if (check("separateExecution", supervisor.host !== "codex" || selected.id !== supervisor.threadId, "The current supervisor and execution chat must be different")) {
+        try {
+          target = await resolveTarget(selected.id, { callApp, projects, threads: allThreads, verifiedProject: project, createdThreadId: context.createdThreadId,
+            expected: { ...context.expectedTarget, ...(project ? { projectId: project.projectId, projectPath: project.path } : {}),
+              ...(args.expectedCwd ? { cwd: args.expectedCwd } : {}) } });
           check("executionChat", true, "The selected execution chat is accessible");
-          if (!args.projectId && !args.projectPath) project ??= projects.find((item) => item.projectId === target.projectId || (targetView.thread.cwd && item.path && path.resolve(item.path).toLowerCase() === path.resolve(targetView.thread.cwd).toLowerCase()));
         } catch (error) { check("executionChat", false, error.message, "Inspect the selected chat without substituting a recent chat."); }
       }
     }
-    if (args.createNew || args.projectPath || args.projectId) check("projectSelection", Boolean(project), "An exact existing Codex project is required", "Use the current project or resolve the user's named project. Do not create a replacement project.");
     if (args.createNew || target) {
-      const policy = await modelPolicy({ threadId: target?.id, projectPath: project?.path,
-        readThread: async () => targetView ?? callApp("read_thread", { threadId: target.id, hostId: "local", turnLimit: 1, includeOutputs: false, maxOutputCharsPerItem: 0 }) });
+      const policy = await modelPolicy({ threadId: target?.threadId, projectPath: project?.path,
+        readThread: () => callApp("read_thread", { threadId: target.threadId, hostId: "local", turnLimit: 1, includeOutputs: false, maxOutputCharsPerItem: 0 }) });
       check("executionStandardMode", policy.ok, policy, policy.nextAction);
     }
     const service = await getService();
@@ -162,7 +198,7 @@ export function createSupervision({ callApp = defaultCallApp, modelPolicy = insp
     check("watchService", true, service.running ? "Background service is running" : "The authorized setup will start the background service before dispatch");
     warnings.push("Read-only checks cannot establish future authentication, model quota, network availability, or a served service-tier receipt. No test message was sent.");
     return { ready: blockers.length === 0, supervisor, project: project ? { projectId: project.projectId, path: project.path } : undefined,
-      target: target ? { threadId: target.id, title: target.title } : undefined, checks, blockers, warnings, modelPolicy: "standardOnly" };
+      target, checks, blockers, warnings, modelPolicy: "standardOnly" };
   }
 
   async function supervise(args, context = {}) {
@@ -171,15 +207,26 @@ export function createSupervision({ callApp = defaultCallApp, modelPolicy = insp
     if ([args.createNew === true, Boolean(args.threadId), Boolean(args.threadTitle)].filter(Boolean).length !== 1)
       throw new Error("Select exactly one execution target: createNew:true, threadId, or threadTitle");
     const receiptId = `supervise:${args.requestId}`;
+    outbox.assertInput(receiptId, args);
     const previous = outbox.inspect(receiptId);
     if (previous.result) return { ...await outbox.execute(receiptId, args, () => { throw new Error("Completed operation unexpectedly lost its receipt"); }), receiptId, requestId: args.requestId };
     const existingPlan = previous.stages?.plan?.result;
-    const prepared = await preflight(existingPlan ? { ...args, supervisor: existingPlan.supervisor,
-      ...(previous.stages?.create?.result?.threadId ? { createNew: false, threadId: previous.stages.create.result.threadId } : {}) } : args, context);
+    if (existingPlan && (!existingPlan.project?.projectId || !existingPlan.project?.path))
+      return { status: "blocked", ready: false, requestId: args.requestId, blockers: [{ code: "legacyProjectBinding",
+        message: "The saved supervision plan has no verified project binding; its receipt was preserved",
+        nextAction: "Inspect the original executor and delivery stages, then explicitly register its intended project. Do not replace the executor or reuse this requestId with changed input." }] };
+    const boundTarget = previous.stages?.target?.result ?? existingPlan?.target;
+    const createdThreadId = previous.stages?.create?.result?.threadId;
+    const retryArgs = existingPlan ? { ...args, supervisor: existingPlan.supervisor, projectId: existingPlan.project.projectId,
+      projectPath: undefined, ...(boundTarget || createdThreadId ? { createNew: false, threadTitle: undefined,
+        threadId: boundTarget?.threadId ?? createdThreadId, expectedCwd: boundTarget?.cwd ?? args.expectedCwd } : {}) } : args;
+    // A title is only a discovery selector. Once persisted, validate the bound ID and project on every retry.
+    const prepared = await preflight(retryArgs, { ...context, expectedTarget: boundTarget,
+      expectedProjectPath: existingPlan?.project.path, verifiedProject: existingPlan?.project, createdThreadId });
     if (!prepared.ready) return { status: "blocked", requestId: args.requestId, ...prepared };
     try {
       const result = await outbox.execute(receiptId, args, async (transaction) => {
-        const plan = await transaction.stage("plan", async () => prepared);
+        const plan = await transaction.stage("plan", async () => prepared, { replaySafe: true });
         try { await ensureService({ resume: true }); }
         catch (error) { error.delivery = "notSent"; throw error; }
         let threadId = plan.target?.threadId;
@@ -188,20 +235,34 @@ export function createSupervision({ callApp = defaultCallApp, modelPolicy = insp
             prompt: taskPrompt(args.task, args.doneWhen), ...(args.title ? { title: args.title } : {}),
             target: { type: "project", projectId: plan.project.projectId, environment: { type: args.worktree ? "worktree" : "local" } },
           }));
-          threadId = created.threadId;
+          threadId = created.threadId ?? boundTarget?.threadId;
           if (!threadId && created.clientThreadId) {
-            const listed = await callApp("list_threads", { limit: 100 });
-            threadId = [...(listed.pinnedThreads ?? []), ...(listed.threads ?? [])].find((item) => item.kind === "codex" && item.clientThreadId === created.clientThreadId)?.id;
+            const listed = await callApp("list_threads", { limit: MAX_RECENT_THREADS });
+            const matches = [...(listed.pinnedThreads ?? []), ...(listed.threads ?? [])].filter((item) => item.kind === "codex" &&
+              (!item.hostId || item.hostId === "local") && item.clientThreadId === created.clientThreadId);
+            const ids = [...new Set(matches.map((item) => item.id))];
+            if (ids.length > 1) throw new Error("Pending creation resolved to multiple chats; inspect the exact creation before continuing");
+            threadId = ids[0];
           }
           if (!threadId) throw Object.assign(new Error("Execution chat setup is pending. Repeat this supervise request with identical input; do not create another chat."), { code: "SETUP_PENDING", pendingClientThreadId: created.clientThreadId });
         }
-        const subscription = await subscribe({ id: `supervise_${key(receiptId)}`, threadId, supervisor: plan.supervisor,
+        const target = args.createNew ? await resolveTarget(threadId, { callApp, verifiedProject: plan.project, createdThreadId: threadId,
+          expected: { ...boundTarget, projectId: plan.project.projectId, projectPath: plan.project.path,
+            ...(args.expectedCwd ? { cwd: args.expectedCwd } : {}), ...(!args.worktree ? { cwd: plan.project.path } : {}) } }) : prepared.target;
+        if (args.createNew) {
+          const policy = await modelPolicy({ threadId, projectPath: plan.project.path,
+            readThread: () => callApp("read_thread", { threadId, hostId: "local", turnLimit: 1, includeOutputs: false, maxOutputCharsPerItem: 0 }) });
+          if (!policy.ok) throw Object.assign(new Error(policy.reason ?? "The created execution chat must use Standard mode"), { delivery: "notSent" });
+        }
+        plan.target = target;
+        await transaction.stage("target", async () => target, { replaySafe: true });
+        const subscription = await subscribe({ id: `supervise_${key(receiptId)}`, threadId, target, supervisor: plan.supervisor,
           goal: { task: args.task, doneWhen: args.doneWhen }, policy: { noFast: true }, workflowRequestId: args.requestId });
         if (!args.createNew) {
           if (!sendReply) throw new Error("The supervision sender was not configured");
-          await sendReply({ threadId, requestId: `${receiptId}:instruction`, message: taskPrompt(args.task, args.doneWhen) });
+          await sendReply({ subscriptionId: subscription.id, threadId, requestId: `${receiptId}:instruction`, message: taskPrompt(args.task, args.doneWhen) });
         }
-        return { status: "watching", ready: true, threadId, subscriptionId: subscription.id, supervisor: subscription.supervisor,
+        return { status: "watching", ready: true, threadId, target, subscriptionId: subscription.id, supervisor: subscription.supervisor,
           task: args.task, doneWhen: args.doneWhen, modelPolicy: "standardOnly", warnings: plan.warnings };
       });
       return { ...result, receiptId, requestId: args.requestId };

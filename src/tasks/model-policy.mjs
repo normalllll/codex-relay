@@ -1,13 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { openReadOnlyDatabase } from "./sqlite.mjs";
+import { openReadOnlyDatabase } from "../runtime/sqlite.mjs";
+import { readSessionPolicy as desktopSessionPolicy } from "../desktop/codex-ipc.mjs";
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 const MAX_ROLLOUT_BYTES = 2 * 1024 * 1024;
 const accelerated = new Set(["fast", "priority", "ultrafast"]);
 const standard = new Set(["default", "standard"]);
-const nextAction = "Select Standard for this Codex session and configure service_tier = \"default\" for new turns, then run preflight again. Relay cannot override the desktop tool's service tier.";
+const newThreadAction = "Configure an explicit service_tier = \"default\" for new threads, resolve any conflicting policy, then run preflight again. Relay does not rewrite global settings.";
+const sessionAction = "Select Standard for this Codex session, then run preflight again with the same requestId. New-thread defaults cannot change an existing session's mode.";
+const unavailableSessionAction = "The host has not exposed an explicit tier for this session. Keep setup blocked and preserve its requestId. Do not repeatedly toggle the tier, rewrite global defaults, or claim Standard was verified. Retry only when a supported session-policy reader or fresh metadata provides the missing evidence.";
 
 function classify(value) {
   if (typeof value !== "string") return "unknown";
@@ -171,36 +174,60 @@ function rolloutEvidence(codexDirectory, threadId) {
   return null;
 }
 
-export async function inspectModelPolicy({ threadId, projectPath, codexDirectory = process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), readThread } = {}) {
+export async function inspectModelPolicy({ threadId, projectPath, codexDirectory = process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), readThread, readSessionPolicy = desktopSessionPolicy } = {}) {
   if (threadId !== undefined && (typeof threadId !== "string" || !/^[A-Za-z0-9_-]{1,300}$/.test(threadId)))
-    return { ok: false, tier: "unknown", evidence: [], reason: "Invalid thread identifier", nextAction };
+    return { ok: false, tier: "unknown", evidence: [], reason: "Invalid thread identifier", nextAction: "Pass the exact valid threadId, then retry the same request." };
   // Saved session settings take precedence over defaults used to create new sessions.
   const config = threadId ? [] : configFiles(path.resolve(codexDirectory), projectPath).map(configEvidence).filter(Boolean);
   const evidence = [...config];
   if (config.some((item) => item.status === "fast"))
-    return { ok: false, tier: "fast", evidence, reason: "An inspected configuration explicitly selects an accelerated tier", nextAction };
+    return { ok: false, tier: "fast", evidence, reason: "An inspected configuration explicitly selects an accelerated tier", nextAction: newThreadAction };
   if (config.some((item) => item.status === "unknown"))
-    return { ok: false, tier: "unknown", evidence, reason: "The effective configuration policy could not be resolved", nextAction };
+    return { ok: false, tier: "unknown", evidence, reason: "The effective configuration policy could not be resolved", nextAction: newThreadAction };
   if (!threadId) {
     const ok = config.some((item) => item.status === "standard");
     return { ok, tier: ok ? "standard" : "unknown", evidence,
-      ...(ok ? { scope: "newThreadConfiguration", servedTierVerified: false } : { reason: "No explicit Standard policy was found for new threads", nextAction }) };
+      ...(ok ? { scope: "newThreadConfiguration", servedTierVerified: false } : { reason: "No explicit Standard policy was found for new threads", nextAction: newThreadAction }) };
   }
-  let tiers = [];
+  let tiers = [], unsettledSession = false;
+  if (readSessionPolicy) {
+    try {
+      const current = await readSessionPolicy(threadId);
+      if (current?.threadId !== threadId) throw new Error("Desktop policy reader returned a different session");
+      if (current.available === true && Object.hasOwn(current, "serviceTier")) {
+        tiers.push(current.serviceTier);
+        evidence.push({ source: "desktopSessionSettings", kind: "session", tiers: [current.serviceTier],
+          protocolVersion: current.protocolVersion, revision: current.revision });
+      } else {
+        unsettledSession = current.reasonCode === "SESSION_SETTINGS_UNSETTLED";
+        evidence.push({ source: "desktopSessionSettings", status: "unavailable", reason: current.reason });
+      }
+    } catch (error) { evidence.push({ source: "desktopSessionSettings", status: "unavailable", reason: error.message.slice(0, 300) }); }
+  }
   if (readThread) {
     try {
-      tiers = tiersFromMetadata(await readThread(threadId));
-      if (tiers.length) evidence.push({ source: "desktopThreadMetadata", kind: "session", tiers });
+      const metadataTiers = tiersFromMetadata(await readThread(threadId));
+      tiers.push(...metadataTiers);
+      if (metadataTiers.length) evidence.push({ source: "desktopThreadMetadata", kind: "session", tiers: metadataTiers });
     } catch { evidence.push({ source: "desktopThreadMetadata", status: "unavailable" }); }
   }
+  if (unsettledSession) return { ok: false, tier: "unknown", evidence, scope: "sessionConfiguration", servedTierVerified: false,
+    reasonCode: "SESSION_TIER_UNAVAILABLE", reason: "The desktop session's current settings have not settled",
+    nextAction: "Keep setup blocked and preserve its requestId. Retry after the exact session finishes applying its settings; do not use historical tier evidence or toggle the tier repeatedly." };
   if (!tiers.length) {
     const rollout = rolloutEvidence(path.resolve(codexDirectory), threadId);
     if (rollout) { tiers = rollout.tiers; evidence.push(rollout); }
   }
   const states = tiers.map(classify);
   const tier = states.includes("fast") ? "fast" : states.length && states.every((state) => state === "standard") ? "standard" : "unknown";
-  return { ok: tier === "standard", tier, evidence, scope: "sessionConfiguration", servedTierVerified: false,
-    ...(tier === "standard" ? {} : { reason: tier === "fast" ? "The session explicitly selects an accelerated tier" : "The current session tier is not explicitly available; global defaults do not prove its mode", nextAction }) };
+  const result = { ok: tier === "standard", tier, evidence, scope: "sessionConfiguration", servedTierVerified: false };
+  if (tier === "standard") return result;
+  if (tier === "fast") return { ...result, reasonCode: "SESSION_TIER_ACCELERATED",
+    reason: "The session explicitly selects an accelerated tier", nextAction: sessionAction };
+  if (tiers.length) return { ...result, reasonCode: "SESSION_TIER_UNRECOGNIZED",
+    reason: "The exposed session tier cannot be classified as Standard", nextAction: "Inspect the exposed session-tier value and host support; keep setup blocked and preserve its requestId." };
+  return { ...result, reasonCode: "SESSION_TIER_UNAVAILABLE",
+    reason: "No inspected session source exposes an explicit tier; global defaults do not prove its mode", nextAction: unavailableSessionAction };
 }
 
 export function assertStandardPolicy(result) {

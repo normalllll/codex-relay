@@ -6,12 +6,19 @@ import crypto from "node:crypto";
 import net from "node:net";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { controlPipeFor } from "../paths.mjs";
+import { controlPipeFor } from "../src/runtime/paths.mjs";
 
 const SOURCE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MARKER = ".codex-relay-managed.json";
 const LAUNCH_AGENT = "local.codex-relay.watcher";
-const REQUIRED = ["cli.mjs", "mcp.mjs", "relay-server.mjs", "daemon.mjs", "service.mjs", "supervision.mjs", "model-policy.mjs", "event-context.mjs", "task-report.mjs", "paths.mjs", "skills/codex-relay/SKILL.md", "scripts/install.mjs"];
+const REQUIRED = [
+  "cli.mjs", "mcp.mjs", "claude-mcp.mjs", "relay-server.mjs", "relay-cli.mjs", "daemon.mjs", "service.mjs", "codex-wait.mjs",
+  ...["tools", "supervision", "event-context", "task-report", "task-target", "project-discovery", "model-policy", "outbox"].map((name) => `src/tasks/${name}.mjs`),
+  ...["codex-client", "codex-ipc", "transport"].map((name) => `src/desktop/${name}.mjs`),
+  ...["daemon-client", "watch-engine", "watch-store", "host-wake"].map((name) => `src/watch/${name}.mjs`),
+  ...["paths", "sqlite", "process-state"].map((name) => `src/runtime/${name}.mjs`),
+  "skills/codex-relay/SKILL.md", "scripts/install.mjs",
+];
 const roots = new Set(["src", "lib", "scripts", "skills", "assets", "docs"]);
 const digest = (data) => crypto.createHash("sha256").update(data).digest("hex");
 const read = (file) => fs.existsSync(file) ? fs.readFileSync(file) : null;

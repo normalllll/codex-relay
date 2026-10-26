@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { scanRolloutBackward } from "../codex-client.mjs";
+import { scanRolloutBackward } from "../src/desktop/codex-client.mjs";
 
 function file(t, text) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-relay-rollout-"));

@@ -7,7 +7,7 @@ import net from "node:net";
 import path from "node:path";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
-import { ipcPipe, controlPipeFor, unixSocket, clearStaleSocket, openUrlCommand } from "../paths.mjs";
+import { ipcPipe, controlPipeFor, unixSocket, clearStaleSocket, openUrlCommand } from "../src/runtime/paths.mjs";
 
 test("desktop IPC follows the Codex app layout for each platform and honors an explicit override", () => {
   assert.equal(ipcPipe({ CODEX_RELAY_IPC_PIPE: "explicit" }, "linux"), "explicit");

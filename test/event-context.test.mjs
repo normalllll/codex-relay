@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WatchStore } from "../watch-store.mjs";
-import { createEventReader } from "../event-context.mjs";
+import { WatchStore } from "../src/watch/watch-store.mjs";
+import { createEventReader } from "../src/tasks/event-context.mjs";
 
 function fixture(t, { goal, snapshot } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-relay-event-context-"));

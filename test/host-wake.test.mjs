@@ -5,11 +5,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { isMissingProcess } from "../process-state.mjs";
+import { isMissingProcess } from "../src/runtime/process-state.mjs";
 // Import without probing the real user's pipe identity; all delivery paths are injected.
 const previousPipe = process.env.CODEX_RELAY_PIPE;
 process.env.CODEX_RELAY_PIPE = "host-wake-test-unused-pipe";
-const { createWakeHost, runHostProcess, buildWakePrompt } = await import("../host-wake.mjs");
+const { createWakeHost, runHostProcess, buildWakePrompt } = await import("../src/watch/host-wake.mjs");
 if (previousPipe === undefined) delete process.env.CODEX_RELAY_PIPE; else process.env.CODEX_RELAY_PIPE = previousPipe;
 
 const event = { id: "event-1", subscriptionId: "watch-1", type: "question", snapshot: { questions: [{ callId: "call-1", index: 0, question: "Which implementation?" }] } };

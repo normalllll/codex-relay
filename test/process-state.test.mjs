@@ -1,7 +1,7 @@
 import { adaptTest } from "./support/harness.mjs";
 const test = adaptTest(await import(process.versions.bun ? "bun:test" : "node:test"));
 import assert from "node:assert/strict";
-import { isMissingProcess } from "../process-state.mjs";
+import { isMissingProcess } from "../src/runtime/process-state.mjs";
 
 test("lock recovery recognizes missing processes without treating access denial as a dead owner", () => {
   assert.equal(isMissingProcess({ code: "ESRCH" }, "linux"), true);

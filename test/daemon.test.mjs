@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
-import { WatchStore } from "../watch-store.mjs";
+import { WatchStore } from "../src/watch/watch-store.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -158,7 +158,11 @@ test("MCP channel receives durable events, acknowledges rearm, and deduplicates 
   assert.ok(initialized.capabilities.experimental["claude/channel"]);
   channel.send({ jsonrpc: "2.0", method: "notifications/initialized" });
   await waitFor(async () => (await f.request("status")).result?.channelSessions?.includes(sessionId), { label: "channel registration" });
-  const subscription = await channel.tool("codex_watch", { threadId: "fake-task", supervisor: { host: "claude", sessionId, mode: "channel" } });
+  // Registration identity checks are covered by the simulated-desktop runtime test.
+  // This fixture isolates channel delivery while the desktop itself is unavailable.
+  const subscription = (await f.request("subscribe", { threadId: "fake-task", supervisor: { host: "claude", sessionId, mode: "channel" },
+    target: { threadId: "fake-task", hostId: "local", title: "Fake task", projectId: "fixture-project", projectPath: f.home, cwd: f.home } })).result;
+  assert.equal((await channel.tool("codex_watches", {}))[0].target.threadId, "fake-task");
   const firstSnapshot = { turnId: "turn-1", turnStatus: "inProgress", questions: [{ callId: "question-1", index: 0, question: "Which authorized option?" }] };
   const [first] = f.store.observe(subscription.id, firstSnapshot);
   await waitFor(() => channel.notifications.find((message) => message.method === "notifications/claude/channel" && message.params.meta.event_id === first.id), { label: "first question notification" });

@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { relayHome } from "./paths.mjs";
-import { isMissingProcess } from "./process-state.mjs";
+import { relayHome } from "../runtime/paths.mjs";
+import { isMissingProcess } from "../runtime/process-state.mjs";
 
 const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
@@ -23,6 +23,13 @@ export class ReplyOutbox {
     const file = path.join(this.dir, `${hash(requestId)}.json`);
     try { return JSON.parse(fs.readFileSync(file, "utf8")); }
     catch (error) { if (error.code === "ENOENT") return { requestId, status: "unknown" }; throw error; }
+  }
+
+  assertInput(requestId, args) {
+    const state = this.inspect(requestId);
+    if (state.fingerprint && state.fingerprint !== hash(JSON.stringify(canonical(args))))
+      throw new Error("requestId was already used for different input");
+    return state;
   }
 
   async execute(requestId, args, run) {
@@ -48,11 +55,24 @@ export class ReplyOutbox {
       const state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { requestId, fingerprint, stages: {}, createdAt: new Date().toISOString() };
       if (state.fingerprint !== fingerprint) throw new Error("requestId was already used for different input");
       if (state.result) return { ...state.result, replayed: true };
+      // Upgrade released, incomplete reply receipts in one place. The original
+      // fingerprint still binds threadId; a repaired subscription must supply
+      // its verified project/cwd before any outstanding stage can resume.
+      if (!state.schemaVersion) {
+        state.schemaVersion = 2;
+        if (!state.stages.target && (state.stages.answers || state.stages.instruction) && args.threadId)
+          state.legacyReplyThreadId = args.threadId;
+        atomic(file, state);
+      }
       const transaction = {
-        stage: async (name, operation) => {
+        legacyReplyThreadId: state.legacyReplyThreadId,
+        delivered: (name) => state.stages[name]?.phase === "delivered" ? structuredClone(state.stages[name]) : null,
+        stage: async (name, operation, { replaySafe = false } = {}) => {
           const old = state.stages[name];
           if (old?.phase === "delivered") return old.result;
-          if (old && ["dispatching", "uncertain"].includes(old.phase))
+          // Only inspection and metadata stages opt in; external writes retain
+          // the uncertainty barrier even after the dispatching process dies.
+          if (!replaySafe && old && ["dispatching", "uncertain"].includes(old.phase))
             throw Object.assign(new Error(`Delivery of ${name} is uncertain. Check the target before creating a replacement request; it was not automatically resent.`), { delivery: "uncertain", requestId });
           state.stages[name] = { phase: "dispatching", startedAt: new Date().toISOString() }; atomic(file, state);
           try {

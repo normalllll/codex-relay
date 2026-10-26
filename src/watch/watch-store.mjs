@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";
-import { isMissingProcess } from "./process-state.mjs";
+import { isMissingProcess } from "../runtime/process-state.mjs";
+import { assertTarget, validateTarget } from "../tasks/task-target.mjs";
 
 const clone = (value) => structuredClone(value);
 const terminalPhases = new Set(["acknowledged"]);
@@ -133,14 +134,19 @@ export class WatchStore {
     if (!input || typeof input.threadId !== "string" || !input.threadId.trim()) throw new Error("threadId is required");
     if (!input.supervisor || !["codex", "claude"].includes(input.supervisor.host)) throw new Error("supervisor.host must be codex or claude");
     if (input.supervisor.host === "codex" && input.supervisor.threadId === input.threadId) throw new Error("A watched thread cannot supervise itself");
+    if (Object.hasOwn(input, "target")) {
+      validateTarget(input.target);
+      assertTarget({ threadId: input.threadId, hostId: "local" }, input.target);
+    }
     const id = input.id ?? `watch_${hash({ threadId: input.threadId, supervisor: input.supervisor }).slice(0, 24)}`;
     if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error("Invalid watch subscription ID");
     return this.transaction((state) => {
       const previous = state.subscriptions[id];
       if (previous && (previous.threadId !== input.threadId || canonical(previous.supervisor) !== canonical(input.supervisor))) throw new Error("Subscription identity is immutable; use a new ID for another target or supervisor");
+      if (previous?.target && input.target) assertTarget(previous.target, input.target);
       const now = Date.now();
       state.subscriptions[id] = {
-        ...previous, ...clone(input), id, enabled: input.enabled ?? true,
+        ...previous, ...clone(input), id, enabled: input.enabled ?? previous?.enabled ?? true,
         createdAt: previous?.createdAt ?? now, updatedAt: now,
         seenQuestions: previous?.seenQuestions ?? [], generation: previous?.generation ?? 0,
       };
@@ -149,6 +155,20 @@ export class WatchStore {
   }
 
   list() { return this.transaction((state) => Object.values(state.subscriptions), { write: false }); }
+
+  get(id) { return this.transaction((state) => state.subscriptions[id] ?? null, { write: false }); }
+
+  bindTarget(id, target) {
+    validateTarget(target);
+    return this.transaction((state) => {
+      const subscription = state.subscriptions[id];
+      if (!subscription?.enabled) throw new Error("The selected watch subscription is inactive or missing");
+      assertTarget({ threadId: subscription.threadId, hostId: "local" }, target);
+      if (subscription.target) assertTarget(subscription.target, target);
+      subscription.target = clone(target);
+      return subscription;
+    });
+  }
 
   remove(id) {
     return this.transaction((state) => {
