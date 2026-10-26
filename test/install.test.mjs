@@ -79,6 +79,29 @@ test("incomplete source trees fail before changing installation integrations", a
   assert.equal(fs.existsSync(path.join(f.relay, "install.json")), false);
 });
 
+test("public CLI entries execute through a directory alias", (t) => {
+  const f = fixture(t);
+  const alias = path.join(f.dir, "source-alias");
+  fs.symlinkSync(fileURLToPath(new URL("../", import.meta.url)), alias, process.platform === "win32" ? "junction" : "dir");
+  const env = {
+    ...process.env, CODEX_HOME: path.join(f.home, ".codex"), CODEX_RELAY_HOME: f.relay,
+    CODEX_RELAY_DAEMON_PIPE: process.platform === "win32" ? `\\\\.\\pipe\\relay-entry-${path.basename(f.dir)}` : path.join(f.dir, "absent.sock"),
+    CODEX_RELAY_STATE_DB: path.join(f.dir, "state.sqlite"),
+  };
+  for (const [entry, args, check] of [
+    ["cli.mjs", ["help"], (value) => assert.equal(value.name, "codex-relay")],
+    ["scripts/install.mjs", ["help"], (value) => assert.ok(value.commands.includes("doctor [--offline] [--json]"))],
+    ["daemon.mjs", ["status"], (value) => assert.equal(value.running, false)],
+  ]) {
+    const result = spawnSync(process.execPath, [path.join(alias, entry), ...args], {
+      cwd: f.dir, env, encoding: "utf8", windowsHide: true, timeout: 15_000,
+    });
+    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    assert.ok(result.stdout.trim(), `${entry} must execute its command through a directory alias`);
+    check(JSON.parse(result.stdout));
+  }
+});
+
 test("actual source snapshot runs root CLI, offline doctor, and MCP discovery from an isolated installation", async (t) => {
   const f = fixture(t);
   const checkout = fileURLToPath(new URL("../", import.meta.url));

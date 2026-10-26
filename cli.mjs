@@ -1,6 +1,5 @@
 import fs from "node:fs";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const commands = {
   projects: "codex_projects", threads: "codex_threads", start: "codex_start", status: "codex_status",
@@ -112,7 +111,9 @@ export async function main(argv = process.argv.slice(2)) {
   return (await import("./src/tasks/tools.mjs")).runTool(tool, args);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+// Module URLs resolve directory aliases, while argv can retain the user's entry path.
+// Resolve with the OS instead of walking potentially unreadable ancestor directories.
+if (process.argv[1] && fs.existsSync(process.argv[1]) && fs.realpathSync.native(fileURLToPath(import.meta.url)) === fs.realpathSync.native(process.argv[1])) {
   try {
     const result = await main();
     console.log(JSON.stringify(result));

@@ -3,7 +3,7 @@ import path from "node:path";
 import net from "node:net";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { relayHome, clearStaleSocket, restrictSocket } from "./src/runtime/paths.mjs";
 import { daemonPipe, daemonToken, daemonRequest, serviceStatus, startService } from "./src/watch/daemon-client.mjs";
 import { WatchStore } from "./src/watch/watch-store.mjs";
@@ -178,7 +178,9 @@ export async function main(argv = process.argv.slice(2)) {
   throw new Error("Unknown daemon command");
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+// Module URLs resolve directory aliases, while argv can retain the user's entry path.
+// Resolve with the OS instead of walking potentially unreadable ancestor directories.
+if (process.argv[1] && fs.existsSync(process.argv[1]) && fs.realpathSync.native(self) === fs.realpathSync.native(process.argv[1])) {
   try { console.log(JSON.stringify(await main())); }
   catch (error) { console.log(JSON.stringify({ ok: false, error: error.message })); process.exitCode = 1; }
 }
