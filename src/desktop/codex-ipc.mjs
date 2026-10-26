@@ -75,12 +75,12 @@ class IpcClient {
     this.buffer = Buffer.concat([this.buffer, chunk]);
     while (this.buffer.length >= 4) {
       const length = this.buffer.readUInt32LE(0);
-      if (length > 8 * 1024 * 1024) return this.socket.destroy(new Error("codex-ipc response exceeds 8 MiB"));
+      if (length > 8 * 1024 * 1024) return this.close(new Error("codex-ipc response exceeds 8 MiB"));
       if (this.buffer.length < length + 4) return;
       let message;
       try { message = JSON.parse(this.buffer.subarray(4, length + 4).toString("utf8")); }
-      catch { return this.socket.destroy(new Error("Invalid codex-ipc response")); }
-      if (!message || typeof message !== "object" || Array.isArray(message)) return this.socket.destroy(new Error("Invalid codex-ipc response"));
+      catch { return this.close(new Error("Invalid codex-ipc response")); }
+      if (!message || typeof message !== "object" || Array.isArray(message)) return this.close(new Error("Invalid codex-ipc response"));
       this.buffer = this.buffer.subarray(length + 4);
       this.onMessage(message);
     }
@@ -163,8 +163,10 @@ class IpcClient {
     });
   }
 
-  close() {
-    this.fail(new Error("codex-ipc connection closed"));
+  close(error = new Error("codex-ipc connection closed")) {
+    // Reject locally detected transport failures before teardown: runtime-specific socket
+    // error/close delivery must not leave operations waiting for their request timers.
+    this.fail(error);
     this.socket.destroy();
   }
 

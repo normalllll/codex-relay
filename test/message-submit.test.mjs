@@ -46,6 +46,7 @@ async function fixture(t, options = {}) {
           else send(socket, snapshot());
         } else if (message.method === "thread-follower-start-turn" || message.method === "thread-follower-steer-turn") {
           if (options.disconnectAfterWrite) { socket.destroy(); continue; }
+          if (options.malformedAfterWrite) { send(socket, null); continue; }
           const accepted = message.method === "thread-follower-start-turn"
             ? { turn: { id: "accepted-turn", status: "inProgress" } } : { turnId: "running-turn" };
           respond({ resultType: "success", method: message.method, handledByClientId: "owner-1", result: { result: accepted }, ...options.response });
@@ -175,13 +176,20 @@ test("snapshot protocol, identity and revision mismatches reject before submissi
   }
 });
 
-test("malformed or disconnected snapshots fail before any work message is submitted", async (t) => {
-  for (const snapshot of [(socket, send) => send(socket, null), socket => socket.destroy(), socket => {
+for (const [name, snapshot, error] of [
+  ["a null response frame", (socket, send) => send(socket, null), /Invalid codex-ipc response/],
+  ["a malformed JSON response frame", socket => {
+    const frame = Buffer.alloc(5); frame.writeUInt32LE(1); frame[4] = "{".charCodeAt(0); socket.write(frame);
+  }, /Invalid codex-ipc response/],
+  ["a disconnected snapshot", socket => socket.destroy(), /connection closed/],
+  ["an oversized response frame", socket => {
     const header = Buffer.alloc(4); header.writeUInt32LE(8 * 1024 * 1024 + 1); socket.write(header);
-  }]) {
-    const f = await fixture(t, { snapshot }); const result = await f.submit();
-    assert.equal(result.ok, false); assert.equal(result.delivery, "notSent"); assert.equal(writes(f).length, 0);
-  }
+  }, /exceeds 8 MiB/],
+]) test(`ordinary input rejects ${name} before any work message is submitted`, async (t) => {
+  const f = await fixture(t, { snapshot }); const result = await f.submit();
+  assert.equal(result.ok, false); assert.equal(result.delivery, "notSent"); assert.equal(writes(f).length, 0);
+  assert.match(result.error, error);
+  assert.doesNotMatch(JSON.stringify(result), /timed out|private-history/);
 });
 
 test("unrelated owner, host and thread broadcasts do not override the exact owner's current state", async (t) => {
@@ -221,6 +229,16 @@ test("a success acknowledgment needs the host's nested start or steer acceptance
 test("a disconnect after writing stays uncertain and does not fall back to delegated delivery", async (t) => {
   const f = await fixture(t, { disconnectAfterWrite: true }); const result = await f.submit();
   assert.equal(result.ok, false); assert.equal(result.delivery, "uncertain"); assert.equal(writes(f).length, 1);
+});
+
+test("a malformed response after writing preserves uncertain delivery and never retries", async (t) => {
+  for (const operation of ["submit", "steer"]) {
+    const f = await fixture(t, { malformedAfterWrite: true }); const result = await f[operation]();
+    assert.equal(result.ok, false); assert.equal(result.delivery, "uncertain");
+    assert.match(result.error, /Invalid codex-ipc response/);
+    assert.doesNotMatch(JSON.stringify(result), /timed out|private-history/);
+    assert.equal(writes(f).length, 1);
+  }
 });
 
 test("explicit inactive-turn or handler rejection is not sent and does not start another turn", async (t) => {

@@ -136,14 +136,20 @@ test("incompatible protocols and mismatched snapshot identities fail closed and 
   }
 });
 
-test("oversized, malformed and disconnected snapshots stop the reader without retaining data", async (t) => {
-  for (const subscribe of [socket => { const header = Buffer.alloc(4); header.writeUInt32LE(8 * 1024 * 1024 + 1); socket.write(header); },
-    (socket, send) => send(socket, null), socket => socket.destroy()]) {
-    const f = await fixture(t, { subscribe });
-    const result = await f.read();
-    assert.equal(result.ok, false);
-    assert.match(result.error, /exceeds 8 MiB|Invalid codex-ipc|connection closed/);
-  }
+for (const [name, subscribe, error] of [
+  ["an oversized response frame", socket => {
+    const header = Buffer.alloc(4); header.writeUInt32LE(8 * 1024 * 1024 + 1); socket.write(header);
+  }, /exceeds 8 MiB/],
+  ["a null response frame", (socket, send) => send(socket, null), /Invalid codex-ipc response/],
+  ["a malformed JSON response frame", socket => {
+    const frame = Buffer.alloc(5); frame.writeUInt32LE(1); frame[4] = "{".charCodeAt(0); socket.write(frame);
+  }, /Invalid codex-ipc response/],
+  ["a disconnected snapshot", socket => socket.destroy(), /connection closed/],
+]) test(`session policy rejects ${name} without retaining data`, async (t) => {
+  const f = await fixture(t, { subscribe }); const result = await f.read();
+  assert.equal(result.ok, false);
+  assert.match(result.error, error);
+  assert.doesNotMatch(JSON.stringify(result), /timed out|private-transcript/);
 });
 
 test("an unavailable snapshot times out once and releases the subscription", { timeout: 10_000 }, async (t) => {
